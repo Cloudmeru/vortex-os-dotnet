@@ -19,6 +19,9 @@ jobs:
       # Bring in the toolchain we need:
       #   * MSVC v143 (cl.exe / link.exe with /clr:netcore support)
       #   * .NET 10 SDK (ref + host packs under %ProgramFiles%\dotnet\packs)
+      - name: Check out source
+        uses: actions/checkout@v4
+
       - name: Set up MSVC + .NET 10
         uses: microsoft/setup-msbuild@v2
 
@@ -30,11 +33,15 @@ jobs:
       # Build. The script writes Vortex.dll to the package root next to
       # Vortex.psm1 (the layout PSGallery / the skill expect), then we
       # copy the artifact up for the upload step.
+      # `working-directory` is set explicitly because `shell: pwsh` doesn't
+      # always default to $GITHUB_WORKSPACE in older runner images.
       - name: Build Vortex.dll
+        working-directory: ${{ github.workspace }}
         shell: pwsh
         run: pwsh -NoProfile -File src/build.ps1
 
       - name: Verify module
+        working-directory: ${{ github.workspace }}
         shell: pwsh
         run: |
           if (-not (Test-Path 'Vortex.dll')) { throw "Vortex.dll not produced" }
@@ -44,6 +51,7 @@ jobs:
           Write-Host "all artifacts present"
 
       - name: Smoke-test the engine from PowerShell 7
+        working-directory: ${{ github.workspace }}
         shell: pwsh
         run: |
           Import-Module ./Vortex.psd1 -Force
