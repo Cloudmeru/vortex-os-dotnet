@@ -274,16 +274,35 @@ static int RunChecks(String^ rootDir) {
 
     // -------------------------------------------------------------------------
     // 2. Tool availability
-    //    Tools are reported as informational, NOT as failures. The Windows CI
-    //    runner doesn't ship jq / sqlite3, and that's fine for verifying the
-    //    engine itself. The tool check exists so a developer notices if a
-    //    required tool is missing on their workstation.
+    //    Only tools the engine actually invokes get checked. The engine is
+    //    pure .NET 10 / C++/CLI — it does NOT use Python, jq, or any
+    //    scripting runtime. The only required external tool is `sqlite3`
+    //    (for the memory vector DB hydrate step in VectorHydrate). The
+    //    rest of the skill is self-contained.
+    //
+    //    Tools are reported as informational, NOT as failures. A missing
+    //    sqlite3 falls back to "schema file preserved at lib/vector_schema.sql"
+    //    (see Commands::VectorHydrate).
+    //
+    //    Install via winget (NOT pip / brew / apt) for Windows compat.
+    //    See the skill's `install-deps.ps1` for the one-liner.
     // -------------------------------------------------------------------------
-    Step("2. Tool check");
-    array<String^>^ tools = gcnew array<String^> { "jq", "python3", "sqlite3" };
-    for each (String ^ t in tools) {
+    Step("2. Tool check (required)");
+    array<String^>^ requiredTools = gcnew array<String^> { "sqlite3" };
+    int requiredMissing = 0;
+    for each (String ^ t in requiredTools) {
         if (HasTool(t)) Ok(t);
-        else Console::WriteLine("    (skipped) " + t + " not installed");
+        else { Console::WriteLine("    (missing) " + t + " — engine will run but VectorHydrate will be skipped"); requiredMissing++; }
+    }
+    if (requiredMissing > 0) {
+        Console::WriteLine("    Install with:  winget install SQLite.SQLite");
+    }
+
+    Step("2b. Tool check (optional, for generated audio deliverables)");
+    array<String^>^ optionalTools = gcnew array<String^> { "ffmpeg" };
+    for each (String ^ t in optionalTools) {
+        if (HasTool(t)) Ok(t);
+        else Console::WriteLine("    (skipped) " + t + " — install with:  winget install Gyan.FFmpeg");
     }
 
     // -------------------------------------------------------------------------

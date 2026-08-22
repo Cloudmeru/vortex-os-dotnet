@@ -4,6 +4,21 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.6] — 2026-08-22
+
+### Changed
+- The verifier's "2. Tool check" step used to check for `jq`,
+  `python3`, and `sqlite3`. **The engine is pure .NET 10 / C++/CLI
+  and uses none of Python, jq, or any scripting runtime.** Only
+  `sqlite3` is actually invoked (by `VectorHydrate` for the memory
+  vector DB). The check now lists `sqlite3` as the only required
+  external tool and `ffmpeg` as the only optional one (used by
+  generated audio deliverables, not by the engine itself). The
+  step now also prints the exact `winget install` command for
+  each missing tool so a code agent (or operator) installing
+  dependencies uses `winget` (Windows-native) instead of `pip`
+  / `brew` / `apt`.
+
 ## [0.1.5] — 2026-08-22
 
 ### Fixed
