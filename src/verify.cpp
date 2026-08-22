@@ -112,16 +112,27 @@ static String^ RunSkill(Paths^ p, String^ argLine) {
     }
 
     try {
-        // Honor $env:VORTEX_SKILL_ROOT so the in-process engine call uses
-        // the skill's agents/ + state/ + memory/ rather than the user-scope
-        // module folder (which has none of those). The env var is set by
-        // verify.ps1 in the skill folder; if it's not set we leave it
-        // alone and the engine falls back to the DLL's directory.
-        if (String::IsNullOrEmpty(Environment::GetEnvironmentVariable("VORTEX_SKILL_ROOT"))) {
-            Environment::SetEnvironmentVariable("VORTEX_SKILL_ROOT", p->RootDir);
+        // Pick the root: $env:VORTEX_SKILL_ROOT if set (caller tells us
+        // where the skill folder is), else the package root, else the
+        // DLL's directory. This matches what the PowerShell psm1 does and
+        // is what makes the in-process engine call find the skill's
+        // agents/ + state/ + memory/.
+        String^ skillRoot = Environment::GetEnvironmentVariable("VORTEX_SKILL_ROOT");
+        String^ engineRoot;
+        if (!String::IsNullOrEmpty(skillRoot)) {
+            engineRoot = skillRoot;
+        } else if (p != nullptr) {
+            engineRoot = p->RootDir;
+        } else {
+            engineRoot = Path::GetDirectoryName(dllPath);
+        }
+        // Persist the env var so the dispatched engine (and any nested
+        // calls) can also see it. Idempotent: set it only if unset.
+        if (String::IsNullOrEmpty(skillRoot)) {
+            Environment::SetEnvironmentVariable("VORTEX_SKILL_ROOT", engineRoot);
         }
         Console::SetOut(sw);
-        exitCode = Vortex::Skill::Run(dllPath, args);
+        exitCode = Vortex::Skill::Run(engineRoot, args);
     } finally {
         Console::SetOut(originalOut);
     }

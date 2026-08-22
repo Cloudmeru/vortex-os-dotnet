@@ -4,6 +4,17 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.4] — 2026-08-22
+
+### Fixed
+- The verifier's in-process `RunSkill` bridge was always passing the
+  engine DLL's path to `Vortex.Skill::Run`, which made the engine
+  resolve its package root to the user-scope module folder (where
+  there are no agents). It now honors `$env:VORTEX_SKILL_ROOT` and
+  falls back to the package root, mirroring what the PowerShell psm1
+  does. With this fix, `verify.ps1`'s "7. Agent lint" step finds and
+  lints the skill folder's agents and reports `LINT_OK` for each one.
+
 ## [0.1.3] — 2026-08-22
 
 ### Fixed
