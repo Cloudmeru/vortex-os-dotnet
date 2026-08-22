@@ -106,8 +106,14 @@ jobs:
         with:
           name: "VORTEX-OS ${{ steps.get_version.outputs.version }}"
           generate_release_notes: true
+          # The vortex-os-skill installer downloads all 4 of these into
+          # $HOME\Documents\PowerShell\Modules\Vortex\<version>\ on Windows.
+          # Vortex.psd1's ModuleVersion must match the release tag so that
+          # Get-Module -ListAvailable can find the installed module.
           files: |
             Vortex.dll
+            Vortex.psm1
+            Vortex.psd1
             ijwhost.dll
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
