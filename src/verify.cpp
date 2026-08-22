@@ -12,7 +12,7 @@
 //   * CORE   — always checked: agents\*.json, README.md, LICENSE.
 //   * SKILL  — only when _meta.json is present (we're inside a VORTEX-OS
 //              skill package): skill.ps1, verify.ps1, SKILL.md, _meta.json,
-//              INSTRUCTIONS.md, install.ps1, build.ps1.
+//              references\INSTRUCTIONS.md, install.ps1, build.ps1.
 //              Also (NEW) the engine itself is no longer bundled in the
 //              skill folder — the skill downloads it from the public
 //              Cloudmeru/vortex-os-dotnet release at install time. So we
@@ -180,7 +180,8 @@ static int RunChecks(String^ rootDir) {
     if (inSkill) {
         Step("1b. File presence (skill)");
         array<String^>^ skillOnly = gcnew array<String^> {
-            "skill.ps1", "verify.ps1", "SKILL.md", "_meta.json", "INSTRUCTIONS.md",
+            "skill.ps1", "verify.ps1", "SKILL.md", "_meta.json",
+            "references\\INSTRUCTIONS.md",
             "install.ps1", "build.ps1"
         };
         for each (String ^ f in skillOnly) {

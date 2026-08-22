@@ -4,6 +4,16 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.5] — 2026-08-22
+
+### Fixed
+- `Vortex.Verify::Run` was checking the skill folder root for
+  `INSTRUCTIONS.md`, but in skill v0.1.2 the operator playbook moved
+  to `references/INSTRUCTIONS.md` (to follow the Mavis/Claude
+  3-level loading convention). The verifier's "1b. File presence
+  (skill)" check now expects `references\INSTRUCTIONS.md` and the
+  core comment header is updated to match.
+
 ## [0.1.4] — 2026-08-22
 
 ### Fixed
