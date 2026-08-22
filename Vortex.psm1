@@ -48,8 +48,14 @@ Add-Type -Path $dllPath
 # --- Internal helper: invoke the C++/CLI dispatcher with an argv array ------
 # The C++/CLI engine writes its results to Console.Out; we capture that
 # stream for the duration of the call and emit each line as pipeline
-# output. Returns the engine's exit code via -PassThru on Write-Output so
-# callers can also branch on it.
+# output. The engine's exit code is stored in $script:VortexLastRc and is
+# also available via the public Get-VortexLastExitCode cmdlet (for
+# scripts like skill.ps1 that want to `exit $rc` after dispatching).
+#
+# The exit code is NOT emitted to the pipeline -- mixing it with the
+# captured lines would corrupt downstream Format-Table / Where-Object
+# pipelines. Callers that need it should call Get-VortexLastExitCode.
+$script:VortexLastRc = 0
 function script:Invoke-Skill {
     [CmdletBinding()]
     param(
@@ -59,10 +65,9 @@ function script:Invoke-Skill {
     $netArgs = [string[]] $Arguments
     $sw = [System.IO.StringWriter]::new()
     $prevOut = [Console]::Out
-    $rc = 0
     try {
         [Console]::SetOut($sw)
-        $rc = [Vortex.Skill]::Run($dllPath, $netArgs)
+        $script:VortexLastRc = [Vortex.Skill]::Run($dllPath, $netArgs)
     } finally {
         [Console]::SetOut($prevOut)
     }
@@ -74,7 +79,6 @@ function script:Invoke-Skill {
             if ($line -ne $null -and $line.Length -gt 0) { Write-Output $line }
         }
     }
-    return $rc
 }
 
 # =============================================================================
@@ -186,6 +190,24 @@ function Test-VortexPackage {
     return ($rc -eq 0)
 }
 
+function Get-VortexLastExitCode {
+<#
+.SYNOPSIS
+    Return the exit code from the most recent Invoke-Vortex / Invoke-Skill call.
+.DESCRIPTION
+    The Vortex cmdlets emit only their data (no trailing exit code) so they
+    can be piped cleanly to Format-Table, Where-Object, etc. Scripts that
+    want to honor the engine's exit code (e.g. skill.ps1 doing
+    `exit $rc`) should call Get-VortexLastExitCode after the cmdlet.
+.EXAMPLE
+    PS> Get-VortexAgent
+    PS> exit (Get-VortexLastExitCode)
+#>
+    [CmdletBinding()]
+    param()
+    return $script:VortexLastRc
+}
+
 # --- Module export ----------------------------------------------------------
 Export-ModuleMember -Function @(
     'Invoke-Vortex'
@@ -195,4 +217,5 @@ Export-ModuleMember -Function @(
     'Approve-VortexHitl'
     'Deny-VortexHitl'
     'Test-VortexPackage'
+    'Get-VortexLastExitCode'
 )
