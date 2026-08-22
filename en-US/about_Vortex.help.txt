@@ -1,0 +1,33 @@
+TOPIC
+    VORTEX-OS — Native Autonomous Studio Command Center
+
+SHORT DESCRIPTION
+    Hierarchical Autonomous Orchestration Engine for the MiniMax ecosystem.
+    PowerShell 7+ module backed by a .NET 10 C++/CLI class library.
+
+LONG DESCRIPTION
+    VORTEX-OS is a Hierarchical Autonomous Orchestration Engine that treats
+    AI agency like a high-stakes, closed-loop corporate operation. It
+    decomposes a master objective across a 4-tier chain of command
+    (General Manager → Store Supervisor → Shift Supervisor → Crew),
+    enforces universe canon via a Continuity Engine, self-heals drifting
+    prompts, and gates every high-stakes action through a Human-in-the-Loop
+    safety halt.
+
+    The engine itself is a C++/CLI class library (Vortex.dll, .NET 10)
+    loaded by PowerShell 7+ via Add-Type. Once the module is imported,
+    every VORTEX-OS capability is reachable as a cmdlet.
+
+EXAMPLES
+    PS> Import-Module Vortex
+    PS> Get-VortexAgent
+    PS> Invoke-Vortex --agents-lint --all
+    PS> Invoke-Vortex --dispatch-master my_project\objective.md
+    PS> Get-VortexHitlPending
+    PS> Approve-VortexHitl -TaskId package_websim
+    PS> Get-VortexAuditTrail
+    PS> Test-VortexPackage
+
+KEYWORDS
+    VORTEX-OS, Vortex, autonomous, orchestration, agent, HITL, continuity,
+    MiniMax, multimodal, swarms

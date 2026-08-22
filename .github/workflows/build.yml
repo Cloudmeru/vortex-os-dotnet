@@ -1,0 +1,61 @@
+name: Build (CI)
+
+# CI build: compile Vortex.dll on every push and PR. The action does NOT
+# publish anywhere — it just proves the source still builds cleanly on a
+# clean Windows runner. Publishing happens in the release workflow.
+
+on:
+  push:
+    branches: [main, master, 'releases/**']
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # Bring in the toolchain we need:
+      #   * MSVC v143 (cl.exe / link.exe with /clr:netcore support)
+      #   * .NET 10 SDK (ref + host packs under %ProgramFiles%\dotnet\packs)
+      - name: Set up MSVC + .NET 10
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Install .NET 10 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      # Build. The script writes Vortex.dll to the package root next to
+      # Vortex.psm1 (the layout PSGallery / the skill expect), then we
+      # copy the artifact up for the upload step.
+      - name: Build Vortex.dll
+        shell: pwsh
+        run: pwsh -NoProfile -File src/build.ps1
+
+      - name: Verify module
+        shell: pwsh
+        run: |
+          if (-not (Test-Path 'Vortex.dll')) { throw "Vortex.dll not produced" }
+          if (-not (Test-Path 'Vortex.psm1')) { throw "Vortex.psm1 not found" }
+          if (-not (Test-Path 'Vortex.psd1')) { throw "Vortex.psd1 not found" }
+          if (-not (Test-Path 'ijwhost.dll')) { throw "ijwhost.dll not found" }
+          Write-Host "all artifacts present"
+
+      - name: Smoke-test the engine from PowerShell 7
+        shell: pwsh
+        run: |
+          Import-Module ./Vortex.psd1 -Force
+          Get-VortexAgent | Tee-Object -Variable out
+          if (-not $out) { throw "Get-VortexAgent returned no rows" }
+          Write-Host "engine runs cleanly under PS7+"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vortex-engine-${{ github.sha }}
+          path: |
+            Vortex.dll
+            ijwhost.dll
+          retention-days: 14

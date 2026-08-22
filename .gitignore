@@ -1,0 +1,43 @@
+# Build artifacts
+*.obj
+*.exp
+*.lib
+*.pdb
+*.ilk
+*.dll
+
+# Output dirs
+obj/
+bin/
+out/
+dist/build/
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# OS junk
+Thumbs.db
+.DS_Store
+desktop.ini
+
+# Test outputs
+TestResults/
+*.trx
+*.coverage
+coverage*.xml
+*.coverage
+
+# Local secrets / private state
+*.pfx
+*.user
+secrets.json
+local.properties
+
+# PowerShell
+*.ps1xml~
