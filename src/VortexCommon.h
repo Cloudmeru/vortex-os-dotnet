@@ -65,14 +65,59 @@ namespace Vortex {
         String^ MemoryDir;        // <HomeDir>/memory
         String^ TasksDir;         // <HomeDir>/tasks
         String^ SwarmsDir;        // <HomeDir>/swarms
-        String^ DeliverablesDir;  // <HomeDir>/deliverables
+        String^ DeliverablesDir;  // <HomeDir>/deliverables (root)
         String^ TmpDir;           // <HomeDir>/state/tmp
+
+        // v0.1.8: per-project subfolder. Deliverables are grouped by
+        // project name so outputs from multiple sessions don't clobber
+        // each other in the same flat directory.
+        String^ ProjectName;           // "" or a slug like "trial_of_echoes"
+        String^ ProjectDeliverablesDir; // <HomeDir>/deliverables/<ProjectName> or
+                                       // <HomeDir>/deliverables if no project
     };
 
     public ref class PathResolver abstract sealed {
     public:
-        // New: takes both roots. Use this when VORTEX_HOME is set or when
-        // the caller wants explicit control over which root is durable.
+        // Slugify a free-form string into a safe filesystem / URL name.
+        //   - lowercases
+        //   - keeps [a-z0-9._-]
+        //   - collapses runs of "-" to one
+        //   - trims leading/trailing "-"
+        // Returns "" for empty / fully-non-alphanumeric input.
+        static String^ Slugify(String^ name) {
+            if (String::IsNullOrEmpty(name)) { return ""; }
+            String^ s = name->ToLower()->Trim();
+            StringBuilder^ sb = gcnew StringBuilder();
+            bool prevDash = false;
+            for (int i = 0; i < s->Length; i++) {
+                wchar_t c = s[i];
+                bool ok = (c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9') || c == L'.' || c == L'_' || c == L'-';
+                if (ok) {
+                    sb->Append(c);
+                    prevDash = (c == L'-');
+                } else if (!prevDash) {
+                    sb->Append(L'-');
+                    prevDash = true;
+                }
+            }
+            String^ result = sb->ToString()->Trim(L'-');
+            return result;
+        }
+
+        // Three-arg form: skillDir + homeDir + projectName. Use this when
+        // the caller knows the project name (e.g. from -Project CLI arg
+        // or VORTEX_PROJECT env var).
+        static Paths^ Resolve(String^ skillDir, String^ homeDir, String^ projectName) {
+            Paths^ p = Resolve(skillDir, homeDir);
+            p->ProjectName = Slugify(projectName);
+            p->ProjectDeliverablesDir = String::IsNullOrEmpty(p->ProjectName)
+                ? p->DeliverablesDir
+                : Path::Combine(p->DeliverablesDir, p->ProjectName);
+            return p;
+        }
+
+        // Two-arg form: skillDir + homeDir, no project. Equivalent to
+        // Resolve(skillDir, homeDir, "").
         static Paths^ Resolve(String^ skillDir, String^ homeDir) {
             auto p = gcnew Paths();
             p->SkillDir = skillDir;
@@ -91,13 +136,15 @@ namespace Vortex {
             p->SwarmsDir        = Path::Combine(homeDir, "swarms");
             p->DeliverablesDir  = Path::Combine(homeDir, "deliverables");
             p->TmpDir           = Path::Combine(homeDir, "state", "tmp");
+            p->ProjectName = "";
+            p->ProjectDeliverablesDir = p->DeliverablesDir;
             return p;
         }
 
         // Backward compat: one root for both. New code should call the
-        // two-arg overload above.
+        // three-arg or two-arg overload above.
         static Paths^ Resolve(String^ path) {
-            return Resolve(path, path);
+            return Resolve(path, path, "");
         }
 
         static void EnsureRuntimeDirs(Paths^ p) {
@@ -107,6 +154,9 @@ namespace Vortex {
             Directory::CreateDirectory(p->DeliverablesDir);
             Directory::CreateDirectory(p->TasksDir);
             Directory::CreateDirectory(p->TmpDir);
+            if (!String::IsNullOrEmpty(p->ProjectName)) {
+                Directory::CreateDirectory(p->ProjectDeliverablesDir);
+            }
         }
     };
 

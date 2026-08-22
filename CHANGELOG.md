@@ -4,6 +4,36 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.8] — 2026-08-22
+
+### Added
+- **Per-project deliverables subfolder.** Deliverables from a
+  dispatch now land in `$env:VORTEX_HOME\deliverables\<project>\`
+  instead of the flat `deliverables\` root. The project name is
+  derived automatically (priority: `$env:VORTEX_PROJECT` →
+  parent dir of `--dispatch-master` arg → filename of the
+  objective without extension) and slugified for filesystem
+  safety. The `Paths` struct gains a `ProjectName` field and a
+  `ProjectDeliverablesDir` computed field; `PathResolver` gains
+  a `Slugify` static helper and a 3-arg `Resolve(skillDir,
+  homeDir, projectName)` overload.
+- **`PathResolver::Slugify`** — lowercases, keeps `[a-z0-9._-]`,
+  collapses runs of `-`, trims leading/trailing `-`. Used for
+  project names and any future user-provided identifiers.
+
+### Changed
+- The `Paths` struct gets two new fields: `ProjectName` and
+  `ProjectDeliverablesDir`. `EnsureRuntimeDirs` creates the
+  per-project subfolder when a project is set. When no project
+  is set, deliverables still land at the flat
+  `$VORTEX_HOME\deliverables\` root (backward compat).
+- `Skill::Run` now resolves the project name before constructing
+  `Paths`. The name comes from (in order): `$env:VORTEX_PROJECT`,
+  the parent dir of the `--dispatch-master` arg, or the
+  filename of the objective without `.md`. The packager
+  (future work) and any deliverable-writing code should use
+  `p->ProjectDeliverablesDir` instead of `p->DeliverablesDir`.
+
 ## [0.1.7] — 2026-08-22
 
 ### Changed (BREAKING for the data location, INTENTIONAL)

@@ -199,7 +199,7 @@ static int CmdAuditTrail(Paths^ p) {
 
 // Print the version banner. Matches _meta.json `version` (0.1.0).
 static int CmdVersion() {
-    Console::WriteLine("VORTEX-OS Vortex.dll 0.1.7 (C++/CLI on PowerShell 7+, .NET 10)");
+    Console::WriteLine("VORTEX-OS Vortex.dll 0.1.8 (C++/CLI on PowerShell 7+, .NET 10)");
     return 0;
 }
 
@@ -371,11 +371,44 @@ namespace Vortex {
         return Path::GetFullPath(dir);
     }
 
+    // Resolve the project name. Priority:
+    //   1. $env:VORTEX_PROJECT (explicit, takes precedence)
+    //   2. --dispatch-master <path>  -> parent dir name if non-empty, else
+    //      filename without extension. So `projects/trial_of_echoes/objective.md`
+    //      -> "trial_of_echoes", and `cartographer_ep1.md` -> "cartographer_ep1".
+    //   3. --dispatch-template <path>  -> same as above
+    //   4. otherwise "" (no project subfolder; flat deliverables/)
+    static String^ ResolveProjectName(array<String^>^ args) {
+        String^ envProject = Environment::GetEnvironmentVariable("VORTEX_PROJECT");
+        if (!String::IsNullOrEmpty(envProject)) {
+            return PathResolver::Slugify(envProject);
+        }
+        if (args == nullptr || args->Length < 2) { return ""; }
+        // Find --dispatch-master or --dispatch-template and look at the
+        // next arg (the path to the objective / template file).
+        for (int i = 0; i < args->Length - 1; i++) {
+            String^ a = args[i];
+            if (a == "--dispatch-master" || a == "--dispatch-template") {
+                String^ path = args[i + 1];
+                if (String::IsNullOrEmpty(path)) { return ""; }
+                // Prefer the parent dir name; fall back to filename.
+                String^ parent = Path::GetFileName(Path::GetDirectoryName(path));
+                if (!String::IsNullOrEmpty(parent)) {
+                    return PathResolver::Slugify(parent);
+                }
+                String^ filename = Path::GetFileNameWithoutExtension(path);
+                return PathResolver::Slugify(filename);
+            }
+        }
+        return "";
+    }
+
     int Skill::Run(String^ skillPath, array<String^>^ args) {
         try {
             String^ skillDir = ResolveSkillDir(skillPath);
             String^ homeDir  = ResolveHomeDir();
-            Paths^ p = PathResolver::Resolve(skillDir, homeDir);
+            String^ projectName = ResolveProjectName(args);
+            Paths^ p = PathResolver::Resolve(skillDir, homeDir, projectName);
             PathResolver::EnsureRuntimeDirs(p);
             return Dispatch(p, args);
         } catch (System::Exception^ ex) {
