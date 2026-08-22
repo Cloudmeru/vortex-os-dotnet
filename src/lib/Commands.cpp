@@ -317,7 +317,10 @@ namespace Vortex {
     // -------------------------------------------------------------------------
     int Commands::VectorHydrate(Paths^ p) {
         Console::WriteLine("Hydrating vector store from agents/ ...");
-        String^ schemaFile = Path::Combine(p->LibDir, "vector_schema.sql");
+        // vector_schema.sql is a skill-scope file (it's part of the engine
+        // library that ships with the skill), so it lives under SkillDir
+        // (= <skill>/lib/), not under the durable VORTEX_HOME.
+        String^ schemaFile = Path::Combine(p->SkillDir, "lib", "vector_schema.sql");
         if (!File::Exists(schemaFile)) {
             Console::WriteLine("OK (no schema file)");
             return 0;
