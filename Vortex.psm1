@@ -55,6 +55,14 @@ Add-Type -Path $dllPath
 # The exit code is NOT emitted to the pipeline -- mixing it with the
 # captured lines would corrupt downstream Format-Table / Where-Object
 # pipelines. Callers that need it should call Get-VortexLastExitCode.
+#
+# Skill root resolution: the engine resolves the package root (where
+# agents/, state/, memory/, deliverables/ live) from the first argument
+# to Vortex.Skill::Run. The skill's skill.ps1 / verify.ps1 set
+# $env:VORTEX_SKILL_ROOT to the skill folder so the engine finds the
+# skill's agents/. If the env var is unset (e.g. a user did
+# `Import-Module Vortex` in a fresh session), we fall back to the DLL's
+# directory, which matches the bash `cd $(dirname $0) && pwd` semantics.
 $script:VortexLastRc = 0
 function script:Invoke-Skill {
     [CmdletBinding()]
@@ -63,11 +71,12 @@ function script:Invoke-Skill {
         [string[]] $Arguments
     )
     $netArgs = [string[]] $Arguments
+    $root = if ($env:VORTEX_SKILL_ROOT) { $env:VORTEX_SKILL_ROOT } else { $dllPath }
     $sw = [System.IO.StringWriter]::new()
     $prevOut = [Console]::Out
     try {
         [Console]::SetOut($sw)
-        $script:VortexLastRc = [Vortex.Skill]::Run($dllPath, $netArgs)
+        $script:VortexLastRc = [Vortex.Skill]::Run($root, $netArgs)
     } finally {
         [Console]::SetOut($prevOut)
     }

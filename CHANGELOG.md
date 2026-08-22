@@ -4,6 +4,29 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] — 2026-08-22
+
+### Fixed
+- `Commands::AgentsLint` only checked `p->AgentsDir` (the engine's
+  install dir), so the `verify.ps1` lint step failed in the
+  install-from-release layout where the engine lives in user-scope but
+  the skill's `agents/` is in the skill folder. Now `AgentsLint` honors
+  `$env:VORTEX_SKILL_ROOT` the same way the discovery path does. The
+  skill's `skill.ps1` and `verify.ps1` set the env var to their own
+  directory before importing the module, so lint + discovery agree.
+
+### Changed
+- `Vortex.psm1`'s `Invoke-Skill` now reads `$env:VORTEX_SKILL_ROOT` and
+  passes it as the engine's package root (instead of always passing
+  the DLL path). This matches the bash version's `cd $(dirname $0) && pwd`
+  semantics and means state files (`memory\audit.jsonl`, `swarms\`,
+  `deliverables\`) end up in the skill folder rather than in the
+  user-scope module folder. If the env var is unset, behavior is
+  unchanged from v0.1.2 (DLL's directory is used).
+- `verify.cpp`'s in-process `RunSkill` bridge also honors
+  `$env:VORTEX_SKILL_ROOT`, setting it to the package root as a
+  fallback when the caller hasn't set it.
+
 ## [0.1.2] — 2026-08-22
 
 ### Fixed

@@ -112,6 +112,14 @@ static String^ RunSkill(Paths^ p, String^ argLine) {
     }
 
     try {
+        // Honor $env:VORTEX_SKILL_ROOT so the in-process engine call uses
+        // the skill's agents/ + state/ + memory/ rather than the user-scope
+        // module folder (which has none of those). The env var is set by
+        // verify.ps1 in the skill folder; if it's not set we leave it
+        // alone and the engine falls back to the DLL's directory.
+        if (String::IsNullOrEmpty(Environment::GetEnvironmentVariable("VORTEX_SKILL_ROOT"))) {
+            Environment::SetEnvironmentVariable("VORTEX_SKILL_ROOT", p->RootDir);
+        }
         Console::SetOut(sw);
         exitCode = Vortex::Skill::Run(dllPath, args);
     } finally {

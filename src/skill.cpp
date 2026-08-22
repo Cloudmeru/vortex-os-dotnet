@@ -199,7 +199,7 @@ static int CmdAuditTrail(Paths^ p) {
 
 // Print the version banner. Matches _meta.json `version` (0.1.0).
 static int CmdVersion() {
-    Console::WriteLine("VORTEX-OS Vortex.dll 0.1.2 (C++/CLI on PowerShell 7+, .NET 10)");
+    Console::WriteLine("VORTEX-OS Vortex.dll 0.1.3 (C++/CLI on PowerShell 7+, .NET 10)");
     return 0;
 }
 
