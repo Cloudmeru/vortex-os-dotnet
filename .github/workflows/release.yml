@@ -22,6 +22,12 @@ on:
         required: true
         default: '0.1.0'
 
+# Default GITHUB_TOKEN is read-only. We need write permission to create
+# releases, attach assets, and (optionally) push packages to ghcr.io.
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   build-and-publish:
     runs-on: windows-latest
