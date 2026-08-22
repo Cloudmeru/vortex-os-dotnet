@@ -62,9 +62,10 @@ static String^ RunSkill(Paths^ p, String^ argLine) {
     System::IO::TextWriter^ originalOut = Console::Out;
     int exitCode = 1;
 
-    // 1. Co-located engine: Vortex.dll at the package root (the .NET source
-    //    repo's build output).
-    String^ coLocated = Path::Combine(p->RootDir, "Vortex.dll");
+    // 1. Co-located engine: Vortex.dll at the skill folder (the .NET source
+    //    repo's build output). This is the SKILL root, not VORTEX_HOME
+    //    (the engine DLL ships with the skill, not with the user's data).
+    String^ coLocated = Path::Combine(p->SkillDir, "Vortex.dll");
     String^ dllPath = nullptr;
     if (File::Exists(coLocated)) {
         dllPath = coLocated;
@@ -122,7 +123,10 @@ static String^ RunSkill(Paths^ p, String^ argLine) {
         if (!String::IsNullOrEmpty(skillRoot)) {
             engineRoot = skillRoot;
         } else if (p != nullptr) {
-            engineRoot = p->RootDir;
+            // The engine's "package root" is the skill folder (where
+            // agents/ and templates/ live). VORTEX_HOME holds the user's
+            // durable state but is not the engine root.
+            engineRoot = p->SkillDir;
         } else {
             engineRoot = Path::GetDirectoryName(dllPath);
         }
@@ -142,15 +146,16 @@ static String^ RunSkill(Paths^ p, String^ argLine) {
 static bool HasFile(String^ path) { return File::Exists(path); }
 static bool HasTool(String^ name) { return ShellX::Has(name); }
 
-// Internal: run the actual verification steps against the package root.
-static int RunChecks(String^ rootDir) {
+// Internal: run the actual verification steps against the Paths object.
+static int RunChecks(Paths^ p) {
     g_failed = 0;
-    Paths^ p = PathResolver::Resolve(rootDir);
     PathResolver::EnsureRuntimeDirs(p);
 
     // Detect context by looking for skill-only and library-only markers.
-    bool inSkill = File::Exists(Path::Combine(p->RootDir, "_meta.json"));
-    bool inLib   = Directory::Exists(Path::Combine(p->RootDir, "src"));
+    // The markers live in the SKILL folder (not VORTEX_HOME), so we use
+    // p->SkillDir here.
+    bool inSkill = File::Exists(Path::Combine(p->SkillDir, "_meta.json"));
+    bool inLib   = Directory::Exists(Path::Combine(p->SkillDir, "src"));
 
     ConsoleColor prev = Console::ForegroundColor;
     Console::ForegroundColor = ConsoleColor::Cyan;
@@ -170,7 +175,7 @@ static int RunChecks(String^ rootDir) {
         "README.md", "LICENSE"
     };
     for each (String ^ f in core) {
-        if (HasFile(Path::Combine(p->RootDir, f))) Ok(f);
+        if (HasFile(Path::Combine(p->SkillDir, f))) Ok(f);
         else Err(f + " MISSING");
     }
 
@@ -185,7 +190,7 @@ static int RunChecks(String^ rootDir) {
             "install.ps1", "build.ps1"
         };
         for each (String ^ f in skillOnly) {
-            if (HasFile(Path::Combine(p->RootDir, f))) Ok(f);
+            if (HasFile(Path::Combine(p->SkillDir, f))) Ok(f);
             else Err(f + " MISSING");
         }
 
@@ -254,7 +259,7 @@ static int RunChecks(String^ rootDir) {
             "src\\lib\\DispatchV4.cpp", "src\\lib\\DispatchV4.h"
         };
         for each (String ^ f in libOnly) {
-            if (HasFile(Path::Combine(p->RootDir, f))) Ok(f);
+            if (HasFile(Path::Combine(p->SkillDir, f))) Ok(f);
             else Err(f + " MISSING");
         }
         // The .NET source repo also publishes Vortex.dll / Vortex.psm1 /
@@ -267,7 +272,7 @@ static int RunChecks(String^ rootDir) {
             "Vortex.dll", "Vortex.psm1", "Vortex.psd1", "ijwhost.dll"
         };
         for each (String ^ f in libArtifacts) {
-            if (HasFile(Path::Combine(p->RootDir, f))) Ok(f);
+            if (HasFile(Path::Combine(p->SkillDir, f))) Ok(f);
             else Console::WriteLine("    (skipped) " + f + " not built yet -- run src\\build.ps1");
         }
     }
@@ -322,7 +327,7 @@ static int RunChecks(String^ rootDir) {
         jsons = withMeta;
     }
     for each (String ^ f in jsons) {
-        String^ full = Path::Combine(p->RootDir, f);
+        String^ full = Path::Combine(p->SkillDir, f);
         if (!File::Exists(full)) continue;
         JsonDocument^ doc = JsonX::ReadFile(full);
         if (doc != nullptr) Ok("json: " + f);
@@ -334,7 +339,7 @@ static int RunChecks(String^ rootDir) {
     // -------------------------------------------------------------------------
     if (inSkill) {
         Step("4. _meta.json validation");
-        String^ metaPath = Path::Combine(p->RootDir, "_meta.json");
+        String^ metaPath = Path::Combine(p->SkillDir, "_meta.json");
         if (File::Exists(metaPath)) {
             JsonDocument^ meta = JsonX::ReadFile(metaPath);
             if (meta == nullptr) {
@@ -369,7 +374,7 @@ static int RunChecks(String^ rootDir) {
     // -------------------------------------------------------------------------
     if (inSkill) {
         Step("5. SKILL.md branding");
-        String^ skillMd = Path::Combine(p->RootDir, "SKILL.md");
+        String^ skillMd = Path::Combine(p->SkillDir, "SKILL.md");
         if (File::Exists(skillMd)) {
             String^ text = File::ReadAllText(skillMd);
             if (text->ToLower()->Contains("vortex-os")) Ok("VORTEX-OS branding present in SKILL.md");
@@ -442,13 +447,37 @@ static int RunChecks(String^ rootDir) {
 
 // =============================================================================
 // Public managed entry point — invoked by the PowerShell Vortex.psm1 module.
-// `rootDir` is the package root (where Vortex.dll, Vortex.psm1, agents/, etc.
-// live). PowerShell resolves this once and passes it in.
+// `skillPath` is the skill folder (where _meta.json, agents/, SKILL.md, etc.
+// live). The engine also reads $env:VORTEX_HOME (default
+// %APPDATA%\Vortex-OS) for the durable state root.
 // =============================================================================
 namespace Vortex {
-    int Verify::Run(String^ rootDir) {
+    // Mirror of skill.cpp::ResolveHomeDir — keep the two in sync.
+    static String^ VerifyHomeDir() {
+        String^ home = Environment::GetEnvironmentVariable("VORTEX_HOME");
+        if (!String::IsNullOrEmpty(home)) {
+            return home;
+        }
+        String^ appData = Environment::GetFolderPath(Environment::SpecialFolder::ApplicationData);
+        home = Path::Combine(appData, "Vortex-OS");
+        if (!Directory::Exists(home)) {
+            Directory::CreateDirectory(home);
+        }
+        return home;
+    }
+
+    int Verify::Run(String^ skillPath) {
         try {
-            return RunChecks(rootDir);
+            String^ skillDir;
+            if (File::Exists(skillPath)) {
+                skillDir = Path::GetDirectoryName(skillPath);
+            } else {
+                skillDir = skillPath;
+            }
+            skillDir = Path::GetFullPath(skillDir);
+            String^ homeDir = VerifyHomeDir();
+            Paths^ p = PathResolver::Resolve(skillDir, homeDir);
+            return RunChecks(p);
         } catch (System::Exception^ ex) {
             Console::Error->WriteLine("ERROR: " + ex->Message);
             return 1;
@@ -457,8 +486,8 @@ namespace Vortex {
 
     int Verify::Run() {
         try {
-            String^ root = System::Reflection::Assembly::GetExecutingAssembly()->Location;
-            return Run(Path::GetDirectoryName(root));
+            String^ dllPath = System::Reflection::Assembly::GetExecutingAssembly()->Location;
+            return Run(Path::GetDirectoryName(dllPath));
         } catch (System::Exception^ ex) {
             Console::Error->WriteLine("ERROR: " + ex->Message);
             return 1;

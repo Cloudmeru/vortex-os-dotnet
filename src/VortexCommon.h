@@ -26,49 +26,78 @@ using namespace System::Globalization;
 namespace Vortex {
 
     // -------------------------------------------------------------------------
-    // Paths (resolved at runtime from the .exe location, matching the bash
-    // ROOT_DIR / STATE_DIR / LIB_DIR / AGENTS_DIR convention)
+    // Paths (resolved at runtime from two roots)
     // -------------------------------------------------------------------------
+    // Starting with v0.1.7, the engine distinguishes between two roots so
+    // that user-facing outputs survive skill updates:
+    //
+    //   * SkillDir  (mutable)   - the skill folder. Holds agents/ and
+    //                              templates/. Gets replaced when the skill
+    //                              is updated. Same dir as the .psm1/.psd1.
+    //   * HomeDir   (durable)   - the user's VORTEX_HOME. Holds state/,
+    //                              memory/, swarms/, deliverables/, tasks/.
+    //                              Persists across skill updates. Shared
+    //                              across multiple skill instances on the
+    //                              same machine (default: %APPDATA%\Vortex-OS).
+    //
+    // The PowerShell wrapper passes SkillDir as the first arg to
+    // Vortex.Skill::Run(); the engine reads HomeDir from $env:VORTEX_HOME
+    // (with a default of %APPDATA%\Vortex-OS).
+    //
+    // For backward compatibility, PathResolver::Resolve(path) treats
+    // `path` as BOTH roots (i.e. legacy single-root behavior). New code
+    // should call PathResolver::Resolve(skillDir, homeDir).
     public ref struct Paths sealed {
-        String^ RootDir;
-        String^ LibDir;
-        String^ AgentsDir;
-        String^ StateDir;
-        String^ MemoryDir;
-        String^ TasksDir;
-        String^ SwarmsDir;
-        String^ DeliverablesDir;
-        String^ TmpDir;
+        // The two roots.
+        String^ SkillDir;         // mutable (the skill folder)
+        String^ HomeDir;          // durable (VORTEX_HOME, default %APPDATA%\Vortex-OS)
+
+        // Legacy alias: many call sites still use p->RootDir. Map it to
+        // HomeDir so the durable state location wins.
+        String^ RootDir;          // == HomeDir (backward compat)
+
+        // Skill-scope paths (under SkillDir). Replaced on skill update.
+        String^ AgentsDir;        // <SkillDir>/agents
+        String^ TemplatesDir;     // <SkillDir>/templates
+
+        // Home-scope paths (under HomeDir). Survive skill updates.
+        String^ StateDir;         // <HomeDir>/state
+        String^ MemoryDir;        // <HomeDir>/memory
+        String^ TasksDir;         // <HomeDir>/tasks
+        String^ SwarmsDir;        // <HomeDir>/swarms
+        String^ DeliverablesDir;  // <HomeDir>/deliverables
+        String^ TmpDir;           // <HomeDir>/state/tmp
     };
 
     public ref class PathResolver abstract sealed {
     public:
-        static Paths^ Resolve(String^ path) {
+        // New: takes both roots. Use this when VORTEX_HOME is set or when
+        // the caller wants explicit control over which root is durable.
+        static Paths^ Resolve(String^ skillDir, String^ homeDir) {
             auto p = gcnew Paths();
-            // Accept either a file path (e.g. C:\pkg\Vortex.dll) or a
-            // directory path (e.g. C:\pkg). When it's a file, use its
-            // containing directory. When it's already a directory, use it
-            // as-is. This matches the bash `cd $(dirname $0) && pwd`
-            // semantics without breaking callers that pass the package root
-            // directly (e.g. the Vortex::Verify in-process bridge from
-            // PowerShell, which receives the .psm1's $PSScriptRoot).
-            String^ dir;
-            if (File::Exists(path)) {
-                dir = Path::GetDirectoryName(path);
-            } else {
-                dir = path;
-            }
-            dir = Path::GetFullPath(dir);
-            p->RootDir          = dir;
-            p->LibDir           = Path::Combine(dir, "lib");
-            p->AgentsDir        = Path::Combine(dir, "agents");
-            p->StateDir         = Path::Combine(dir, "state");
-            p->MemoryDir        = Path::Combine(dir, "memory");
-            p->TasksDir         = Path::Combine(dir, "tasks");
-            p->SwarmsDir        = Path::Combine(dir, "swarms");
-            p->DeliverablesDir  = Path::Combine(dir, "deliverables");
-            p->TmpDir           = Path::Combine(Path::GetTempPath(), "vortex");
+            p->SkillDir = skillDir;
+            p->HomeDir = homeDir;
+            p->RootDir = homeDir;  // legacy alias: callers that use
+                                    // p->RootDir for file-presence checks
+                                    // should now use p->SkillDir; callers
+                                    // that use it for state/audit should
+                                    // use p->HomeDir. RootDir == HomeDir
+                                    // is the closest legacy behavior.
+            p->AgentsDir        = Path::Combine(skillDir, "agents");
+            p->TemplatesDir     = Path::Combine(skillDir, "templates");
+            p->StateDir         = Path::Combine(homeDir, "state");
+            p->MemoryDir        = Path::Combine(homeDir, "memory");
+            p->TasksDir         = Path::Combine(homeDir, "tasks");
+            p->SwarmsDir        = Path::Combine(homeDir, "swarms");
+            p->DeliverablesDir  = Path::Combine(homeDir, "deliverables");
+            p->TmpDir           = Path::Combine(homeDir, "state", "tmp");
             return p;
+        }
+
+        // Backward compat: one root for both. New code should call the
+        // two-arg overload above.
+        static Paths^ Resolve(String^ path) {
+            return Resolve(path, path);
         }
 
         static void EnsureRuntimeDirs(Paths^ p) {

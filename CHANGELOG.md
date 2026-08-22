@@ -4,6 +4,50 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.7] — 2026-08-22
+
+### Changed (BREAKING for the data location, INTENTIONAL)
+- **Split the single "root" into two roots: `SkillDir` + `HomeDir`.**
+  Previously the engine resolved `state/`, `memory/`, `swarms/`,
+  `deliverables/`, `tasks/`, and `agents/` all from one path (the
+  skill folder). The skill folder is meant to be replaced on update
+  (via `git pull`, fresh deploy, etc.), so anything written there
+  was at risk of being wiped. Starting with v0.1.7, the engine
+  reads `$env:VORTEX_HOME` (default: `%APPDATA%\Vortex-OS`) for the
+  durable state root and uses the skill folder ONLY for `agents/`
+  and `templates/`. This means:
+    * **User deliverables survive skill updates.** `deliverables/`,
+      `memory/audit.jsonl`, `swarms/*/`, `state/` are all now in
+      `%APPDATA%\Vortex-OS\` (or `$env:VORTEX_HOME` if set).
+    * **Multiple skill instances share state.** Two code agents that
+      both have the VORTEX-OS skill deployed (e.g. minimax code +
+      hermes on the same machine) now read/write the same data
+      because `$env:APPDATA%\Vortex-OS` is the default and is the
+      same path for any process run by the same user.
+    * **The skill folder is now just the "installer + manifest"** —
+      the scripts (`skill.ps1`, `verify.ps1`, `install.ps1`,
+      `install-deps.ps1`, `build.ps1`), the agent manifests
+      (`agents/*.json`), the templates (`templates/`), the docs
+      (`SKILL.md`, `README.md`, `references/INSTRUCTIONS.md`, etc.),
+      and the platform metadata (`_meta.json`).
+- The `Paths` struct gains a `HomeDir` field; `RootDir` is kept as
+  a legacy alias equal to `HomeDir` for any old call site. The new
+  two-arg `PathResolver::Resolve(skillDir, homeDir)` is the
+  preferred form; the one-arg form delegates to it (both roots
+  same = legacy behavior).
+- All `p->RootDir` references inside `verify.cpp` were updated to
+  use `p->SkillDir` (which is where the skill files actually live
+  now). The verifier still checks the right files; it just no
+  longer confuses "where the user data lives" with "where the
+  skill folder is".
+
+### Migration
+- **Manual.** The engine does NOT auto-migrate. Run the new
+  `vortex-os-skill` v0.1.4's `migrate-state.ps1` to move existing
+  data from the skill folder to `%APPDATA%\Vortex-OS\`. Old data
+  is left in place after migration so the operator can verify
+  before deleting.
+
 ## [0.1.6] — 2026-08-22
 
 ### Changed

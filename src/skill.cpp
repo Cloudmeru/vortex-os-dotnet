@@ -199,7 +199,7 @@ static int CmdAuditTrail(Paths^ p) {
 
 // Print the version banner. Matches _meta.json `version` (0.1.0).
 static int CmdVersion() {
-    Console::WriteLine("VORTEX-OS Vortex.dll 0.1.6 (C++/CLI on PowerShell 7+, .NET 10)");
+    Console::WriteLine("VORTEX-OS Vortex.dll 0.1.7 (C++/CLI on PowerShell 7+, .NET 10)");
     return 0;
 }
 
@@ -341,9 +341,41 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
 // Vortex::Skill::Run implementations (declared in VortexPublic.h).
 // =============================================================================
 namespace Vortex {
-    int Skill::Run(String^ dllPath, array<String^>^ args) {
+    // Resolve the durable state root (VORTEX_HOME). Reads $env:VORTEX_HOME
+    // and falls back to %APPDATA%\Vortex-OS so the engine writes to a
+    // user-scope location that survives skill updates. Creates the
+    // directory on first use.
+    static String^ ResolveHomeDir() {
+        String^ home = Environment::GetEnvironmentVariable("VORTEX_HOME");
+        if (!String::IsNullOrEmpty(home)) {
+            return home;
+        }
+        String^ appData = Environment::GetFolderPath(Environment::SpecialFolder::ApplicationData);
+        home = Path::Combine(appData, "Vortex-OS");
+        if (!Directory::Exists(home)) {
+            Directory::CreateDirectory(home);
+        }
+        return home;
+    }
+
+    // Resolve the skill folder from a possibly-file path. Same logic as
+    // the legacy PathResolver::Resolve(single-arg): if `path` is a file,
+    // use its containing directory; otherwise use as-is.
+    static String^ ResolveSkillDir(String^ path) {
+        String^ dir;
+        if (File::Exists(path)) {
+            dir = Path::GetDirectoryName(path);
+        } else {
+            dir = path;
+        }
+        return Path::GetFullPath(dir);
+    }
+
+    int Skill::Run(String^ skillPath, array<String^>^ args) {
         try {
-            Paths^ p = PathResolver::Resolve(dllPath);
+            String^ skillDir = ResolveSkillDir(skillPath);
+            String^ homeDir  = ResolveHomeDir();
+            Paths^ p = PathResolver::Resolve(skillDir, homeDir);
             PathResolver::EnsureRuntimeDirs(p);
             return Dispatch(p, args);
         } catch (System::Exception^ ex) {
