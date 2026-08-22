@@ -20,7 +20,7 @@ on:
       version:
         description: 'Version to publish (must already exist as a module version)'
         required: true
-        default: '0.1.1'
+        default: '0.1.2'
 
 # Default GITHUB_TOKEN is read-only. We need write permission to create
 # releases, attach assets, and (optionally) push packages to ghcr.io.

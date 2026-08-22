@@ -4,6 +4,28 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] — 2026-08-22
+
+### Fixed
+- `Vortex.Verify::Run` (the in-process verifier) was checking the skill
+  package root for `Vortex.dll` / `Vortex.psm1` / `Vortex.psd1` /
+  `ijwhost.dll` and `lib\*.h`, which makes sense for the bundled-engine
+  layout but not for the new install-from-release layout where the
+  engine lives in a user-scope module folder. The verifier now:
+    * Drops those four DLLs from the "always required" core check.
+    * Drops `lib\*.h` from the skill-only check (those are .NET source
+      files, not the skill's).
+    * Adds a new "1c. Engine installation (user-scope)" check that
+      scans `$env:PSModulePath` + the canonical
+      `$HOME\Documents\PowerShell\Modules` for an installed
+      `Vortex\<version>\Vortex.dll` + `Vortex.psd1` + `ijwhost.dll`.
+    * Locates the engine for the in-process `RunSkill` bridge by the
+      same scan (previously hardcoded `<root>\Vortex.dll`).
+- `Vortex.Skill::Run` invoked from the in-process `RunSkill` bridge no
+  longer errors when the engine is co-located with the .NET source
+  repo's build output (it prefers the co-located DLL, then falls back
+  to the user-scope scan).
+
 ## [0.1.1] — 2026-08-22
 
 ### Fixed

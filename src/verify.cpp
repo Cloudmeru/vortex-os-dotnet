@@ -9,14 +9,21 @@
 // modules share the same DLL, same runtime, same Paths/EnsureRuntimeDirs.
 //
 // The check list is context-aware:
-//   * CORE   — always checked: Vortex.dll, Vortex.psm1, Vortex.psd1,
-//              ijwhost.dll, agents\*.json, README.md, LICENSE.
+//   * CORE   — always checked: agents\*.json, README.md, LICENSE.
 //   * SKILL  — only when _meta.json is present (we're inside a VORTEX-OS
-//              skill package): skill.ps1, verify.ps1, SKILL.md,
-//              INSTRUCTIONS.md, _meta.json, lib\*.h.
+//              skill package): skill.ps1, verify.ps1, SKILL.md, _meta.json,
+//              INSTRUCTIONS.md, install.ps1, build.ps1.
+//              Also (NEW) the engine itself is no longer bundled in the
+//              skill folder — the skill downloads it from the public
+//              Cloudmeru/vortex-os-dotnet release at install time. So we
+//              check that the engine is installed in a user-scope module
+//              folder instead.
 //   * LIB    — only when src\ exists (we're inside the .NET source repo):
 //              src\skill.cpp, src\verify.cpp, src\build.ps1, src\VortexCommon.h,
-//              src\VortexPublic.h, src\lib\*.cpp.
+//              src\VortexPublic.h, src\lib\*.cpp, plus the published
+//              Vortex.dll / Vortex.psm1 / Vortex.psd1 / ijwhost.dll at
+//              the package root (since the library repo is the source of
+//              truth for those binaries).
 //
 // Returns: the number of failed checks (0 == all green).
 // =============================================================================
@@ -37,6 +44,10 @@ static void Err(String^ s)  { ConsoleX::Fail(s); g_failed++; }
 // In-process bridge to the skill engine. The bash version shell-spawned
 // `skill.exe`; we now call Vortex::Skill::Run directly so verification is
 // fast, deterministic, and free of `skill.exe` deploy-order coupling.
+//
+// The engine (Vortex.dll) may live in the package root (when verifying the
+// .NET source repo) or in a user-scope module folder (when verifying a
+// skill that downloads the engine at install time). We probe both locations.
 static String^ RunSkill(Paths^ p, String^ argLine) {
     array<String^>^ args;
     if (String::IsNullOrEmpty(argLine)) {
@@ -50,9 +61,59 @@ static String^ RunSkill(Paths^ p, String^ argLine) {
     System::IO::StringWriter^ sw = gcnew System::IO::StringWriter();
     System::IO::TextWriter^ originalOut = Console::Out;
     int exitCode = 1;
+
+    // 1. Co-located engine: Vortex.dll at the package root (the .NET source
+    //    repo's build output).
+    String^ coLocated = Path::Combine(p->RootDir, "Vortex.dll");
+    String^ dllPath = nullptr;
+    if (File::Exists(coLocated)) {
+        dllPath = coLocated;
+    } else {
+        // 2. User-scope engine: scan PSModulePath + canonical Documents\
+        //    PowerShell\Modules for the latest installed Vortex.<ver>\Vortex.dll.
+        List<String^>^ bases = gcnew List<String^>();
+        String^ envOverride = Environment::GetEnvironmentVariable("VORTEX_MODULE_PATH");
+        if (!String::IsNullOrEmpty(envOverride)) bases->Add(envOverride);
+        String^ psmp = Environment::GetEnvironmentVariable("PSModulePath");
+        if (!String::IsNullOrEmpty(psmp)) {
+            for each (String ^ entry in psmp->Split(';')) {
+                String^ e = entry->Trim();
+                if (String::IsNullOrEmpty(e)) continue;
+                if (e->Contains("WindowsPowerShell")) continue;
+                if (e->Contains("Program Files")) continue;
+                if (!bases->Contains(e)) bases->Add(e);
+            }
+        }
+        String^ home = Environment::GetFolderPath(Environment::SpecialFolder::UserProfile);
+        String^ canonical = Path::Combine(home, "Documents", "PowerShell", "Modules");
+        if (!bases->Contains(canonical)) bases->Add(canonical);
+        for each (String ^ base in bases) {
+            String^ vortexDir = Path::Combine(base, "Vortex");
+            if (!Directory::Exists(vortexDir)) continue;
+            // Pick the highest version. PowerShell stores modules in
+            // Modules\<Name>\<Version>\; the highest directory name is
+            // "newest" by string sort for semver-shaped names.
+            String^ best = nullptr;
+            for each (String ^ vdir in Directory::GetDirectories(vortexDir)) {
+                String^ name = Path::GetFileName(vdir);
+                if (best == nullptr || String::Compare(name, best, StringComparison::OrdinalIgnoreCase) > 0) {
+                    best = name;
+                }
+            }
+            if (best != nullptr) {
+                String^ candidate = Path::Combine(Path::Combine(vortexDir, best), "Vortex.dll");
+                if (File::Exists(candidate)) { dllPath = candidate; break; }
+            }
+        }
+    }
+    if (dllPath == nullptr) {
+        Console::Error->WriteLine("ERROR: cannot locate Vortex.dll (not at package root, not in any user-scope module folder). Run install.ps1 first.");
+        return "";
+    }
+
     try {
         Console::SetOut(sw);
-        exitCode = Vortex::Skill::Run(p->RootDir + "\\Vortex.dll", args);
+        exitCode = Vortex::Skill::Run(dllPath, args);
     } finally {
         Console::SetOut(originalOut);
     }
@@ -85,7 +146,6 @@ static int RunChecks(String^ rootDir) {
     // -------------------------------------------------------------------------
     Step("1. File presence (core)");
     array<String^>^ core = gcnew array<String^> {
-        "Vortex.dll", "Vortex.psm1", "Vortex.psd1", "ijwhost.dll",
         "agents\\supervisor.store.json", "agents\\supervisor.shift.json",
         "agents\\inspector.governance.json",
         "README.md", "LICENSE"
@@ -102,20 +162,67 @@ static int RunChecks(String^ rootDir) {
         Step("1b. File presence (skill)");
         array<String^>^ skillOnly = gcnew array<String^> {
             "skill.ps1", "verify.ps1", "SKILL.md", "_meta.json", "INSTRUCTIONS.md",
-            "lib\\Swarm.h", "lib\\Hitl.h", "lib\\Inspector.h", "lib\\PromptOptimizer.h",
-            "lib\\DispatchV4.h", "lib\\Commands.h"
+            "install.ps1", "build.ps1"
         };
         for each (String ^ f in skillOnly) {
             if (HasFile(Path::Combine(p->RootDir, f))) Ok(f);
             else Err(f + " MISSING");
         }
+
+        // 1b+. Engine installation check. The skill no longer bundles the
+        // engine -- it downloads it from the public GitHub release of
+        // Cloudmeru/vortex-os-dotnet at install time. We verify the engine
+        // is present in a user-scope module folder instead. We look at:
+        //   * $env:VORTEX_MODULE_PATH (skill installer override)
+        //   * every per-user entry in $env:PSModulePath
+        //   * the canonical $HOME\Documents\PowerShell\Modules fallback
+        // (the same search order the skill's own install.ps1 uses).
+        Step("1c. Engine installation (user-scope)");
+        bool engineOk = false;
+        array<String^>^ moduleBases = gcnew array<String^>(0);
+        List<String^>^ bases = gcnew List<String^>();
+        String^ envOverride = Environment::GetEnvironmentVariable("VORTEX_MODULE_PATH");
+        if (!String::IsNullOrEmpty(envOverride)) bases->Add(envOverride);
+        String^ psmp = Environment::GetEnvironmentVariable("PSModulePath");
+        if (!String::IsNullOrEmpty(psmp)) {
+            for each (String ^ entry in psmp->Split(';')) {
+                String^ e = entry->Trim();
+                if (String::IsNullOrEmpty(e)) continue;
+                if (e->Contains("WindowsPowerShell")) continue;
+                if (e->Contains("Program Files")) continue;
+                if (!bases->Contains(e)) bases->Add(e);
+            }
+        }
+        String^ home = Environment::GetFolderPath(Environment::SpecialFolder::UserProfile);
+        String^ canonical = Path::Combine(home, "Documents", "PowerShell", "Modules");
+        if (!bases->Contains(canonical)) bases->Add(canonical);
+        for each (String ^ base in bases) {
+            String^ vortexDir = Path::Combine(base, "Vortex");
+            if (!Directory::Exists(vortexDir)) continue;
+            for each (String ^ vdir in Directory::GetDirectories(vortexDir)) {
+                String^ psd1 = Path::Combine(vdir, "Vortex.psd1");
+                if (File::Exists(psd1)) {
+                    String^ dll = Path::Combine(vdir, "Vortex.dll");
+                    String^ ijw = Path::Combine(vdir, "ijwhost.dll");
+                    if (File::Exists(dll) && File::Exists(ijw)) {
+                        Ok("engine installed at " + vdir);
+                        engineOk = true;
+                        break;
+                    }
+                }
+            }
+            if (engineOk) break;
+        }
+        if (!engineOk) {
+            Err("engine not installed in any user-scope module folder -- run .\\install.ps1");
+        }
     }
 
     // -------------------------------------------------------------------------
-    // 1c. File presence — library-only (only when src\ is present)
+    // 1d. File presence — library-only (only when src\ is present)
     // -------------------------------------------------------------------------
     if (inLib) {
-        Step("1c. File presence (library source)");
+        Step("1d. File presence (library source)");
         array<String^>^ libOnly = gcnew array<String^> {
             "src\\skill.cpp", "src\\verify.cpp", "src\\build.ps1",
             "src\\VortexCommon.h", "src\\VortexPublic.h",
@@ -129,6 +236,19 @@ static int RunChecks(String^ rootDir) {
         for each (String ^ f in libOnly) {
             if (HasFile(Path::Combine(p->RootDir, f))) Ok(f);
             else Err(f + " MISSING");
+        }
+        // The .NET source repo also publishes Vortex.dll / Vortex.psm1 /
+        // Vortex.psd1 / ijwhost.dll at the repo root (these are the build
+        // outputs the GitHub release attaches). When verifying the library
+        // repo (vs. a clean source checkout) we expect them to be present
+        // because the build script writes them there.
+        Step("1e. Library build outputs");
+        array<String^>^ libArtifacts = gcnew array<String^> {
+            "Vortex.dll", "Vortex.psm1", "Vortex.psd1", "ijwhost.dll"
+        };
+        for each (String ^ f in libArtifacts) {
+            if (HasFile(Path::Combine(p->RootDir, f))) Ok(f);
+            else Console::WriteLine("    (skipped) " + f + " not built yet -- run src\\build.ps1");
         }
     }
 
