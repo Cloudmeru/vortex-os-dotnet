@@ -46,16 +46,34 @@ if (-not (Test-Path $ijwHostPath)) {
 Add-Type -Path $dllPath
 
 # --- Internal helper: invoke the C++/CLI dispatcher with an argv array ------
+# The C++/CLI engine writes its results to Console.Out; we capture that
+# stream for the duration of the call and emit each line as pipeline
+# output. Returns the engine's exit code via -PassThru on Write-Output so
+# callers can also branch on it.
 function script:Invoke-Skill {
     [CmdletBinding()]
     param(
         [Parameter(Mandatory, Position = 0, ValueFromRemainingArguments)]
         [string[]] $Arguments
     )
-    # Convert PowerShell string array to .NET String[] (PowerShell unwraps
-    # single-element arrays in some contexts, so be explicit).
     $netArgs = [string[]] $Arguments
-    [int] $rc = [Vortex.Skill]::Run($dllPath, $netArgs)
+    $sw = [System.IO.StringWriter]::new()
+    $prevOut = [Console]::Out
+    $rc = 0
+    try {
+        [Console]::SetOut($sw)
+        $rc = [Vortex.Skill]::Run($dllPath, $netArgs)
+    } finally {
+        [Console]::SetOut($prevOut)
+    }
+    $captured = $sw.ToString().TrimEnd("`r", "`n")
+    if ($captured.Length -gt 0) {
+        # Emit each non-empty line as a separate pipeline element so callers
+        # can pipe to Where-Object / ForEach-Object / Tee-Object as usual.
+        foreach ($line in ($captured -split "(`r`n)|(`n)")) {
+            if ($line -ne $null -and $line.Length -gt 0) { Write-Output $line }
+        }
+    }
     return $rc
 }
 
