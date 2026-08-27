@@ -1,8 +1,9 @@
 // =============================================================================
-// VORTEX-OS — HITL Module implementation
+// VORTEX-OS - HITL Module implementation
 // =============================================================================
 #include "Hitl.h"
 #include "DispatchV4.h"
+#include "Decisions.h"
 
 namespace Vortex {
 

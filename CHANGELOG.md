@@ -4,6 +4,59 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.9] — 2026-08-22
+
+### Added
+- **Packager worker** (`--package <swarm_id> [--dry-run]`). Copies a
+  swarm's intermediate deliverables from
+  `$VORTEX_HOME\swarms\active_<id>\deliverables\` to the project's
+  durable location (`$VORTEX_HOME\deliverables\<project>\`) and writes
+  a `.manifest.json` next to the files. Manifest contains: swarm_id,
+  project, packaged_at, engine_version, summary (copied/skipped/failed),
+  and per-file status (COPIED / SKIPPED_EXISTS / FAILED / DRY_RUN),
+  byte count, and a 16-hex-char content checksum. Refuses to overwrite
+  existing files at the target (per ADR-015). Ships as
+  `lib/Packager.{h,cpp}`.
+- **Golden Path template replay** (`--dispatch-template <template.json>`).
+  Reads a template with `objective_template` (or `body`) and
+  `substitutions`, fills in `{{episode_number}}`,
+  `{{operator_choice}}`, and any `{{key}}` from `--template-var k=v`
+  or the per-field shortcuts (`--protagonist=...`, `--antagonist=...`,
+  `--setting=...`, `--diegetic-clock=...`, `--episode-title=...`),
+  writes the rendered objective to `tasks/<task_id>.md`, and dispatches
+  it via the standard V4 master pipeline. The template file is
+  `templates/episode_pattern.json` in the skill repo. Ships as
+  `lib/Template.{h,cpp}`.
+- **Operator-driven branching** (`--decision-record` /
+  `--decision-list`). Persists every operator-driven choice (HITL gate
+  approvals / denials, moral-hinge resolutions, etc.) to
+  `$VORTEX_HOME\state\decision_history.json`. The `{{operator_choice}}`
+  substitution in `--dispatch-template` pulls the most recent
+  CRITICAL-gate decision automatically when `--episode-number >= 2`.
+  CRITICAL-gate approvals / denials via `--hitl-approve` / `--hitl-deny`
+  are auto-recorded too (no manual `--decision-record` required for the
+  common case). Ships as `lib/Decisions.{h,cpp}`.
+- **Engine unit tests.** `src/build-tests.ps1` compiles the engine
+  (all 9 lib sources) + a C++ smoke-test program (`tests/test_engine.cpp`).
+  Known issue: link.exe in .NET 5+ ignores /SUBSYSTEM:CONSOLE for
+  C++/CLI mixed-mode exes, so the resulting test_engine.exe cannot
+  be launched. The PowerShell counterpart `tests/test_engine.ps1`
+  exercises the same surface end-to-end via skill.ps1 and exits 0
+  on all-pass / 1 on any-fail. 33 assertions cover Slugify,
+  substitute, decisions round-trip, packager dry-run + real run +
+  refuse-to-overwrite, and the full template-replay rendering.
+- **`System.Security.Cryptography.dll` reference** added to the build's
+  $fuList so `SHA1::Create` is available for the packager's
+  content-aware checksumming.
+
+### Changed
+- **Version bump** to 0.1.9 (banner string + Vortex.psd1 ModuleVersion
+  + .NET ref-pack manifest).
+- **`Hitl.cpp`** now imports `Decisions.h` and records every
+  CRITICAL-gate approval/denial into the decision history. Routine
+  (HIGH severity) gates still write only the pending_approvals
+  checkpoint; only CRITICAL ones propagate to decision_history.json.
+
 ## [0.1.8] — 2026-08-22
 
 ### Added

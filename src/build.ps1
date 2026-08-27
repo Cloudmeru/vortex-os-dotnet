@@ -144,7 +144,10 @@ $fuList = @(
     'System.Linq.dll',
     'System.ObjectModel.dll',
     'System.Reflection.dll',
-    'System.Resources.ResourceManager.dll'
+    'System.Resources.ResourceManager.dll',
+    'System.Security.Cryptography.Algorithms.dll',
+    'System.Security.Cryptography.dll',
+    'System.Security.Principal.dll'
 ) | ForEach-Object { "/FU`"$refNet10\$_`"" }
 
 $clFlags = @(
@@ -192,7 +195,10 @@ $sources = @(
     'lib\Hitl.cpp',
     'lib\Inspector.cpp',
     'lib\PromptOptimizer.cpp',
-    'lib\DispatchV4.cpp'
+    'lib\DispatchV4.cpp',
+    'lib\Decisions.cpp',
+    'lib\Template.cpp',
+    'lib\Packager.cpp'
 ) | ForEach-Object { Join-Path $scriptDir $_ }
 
 # cl.exe refuses to accept per-source /Fo when given multiple source files

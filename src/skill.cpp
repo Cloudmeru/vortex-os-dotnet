@@ -18,6 +18,9 @@
 #include "lib/Inspector.h"
 #include "lib/PromptOptimizer.h"
 #include "lib/DispatchV4.h"
+#include "lib/Decisions.h"
+#include "lib/Template.h"
+#include "lib/Packager.h"
 
 using namespace Vortex;
 using namespace System::Text::Json;
@@ -46,16 +49,43 @@ static int CmdDispatchMaster(Paths^ p, String^ objectiveFile) {
 }
 
 // Replay a saved Golden Path workflow template
-static int CmdDispatchTemplate(Paths^ p, String^ templateFile) {
+static int CmdDispatchTemplate(Paths^ p, String^ templateFile, int episodeNumber,
+                               array<String^>^ overrides, String^ taskId) {
     if (String::IsNullOrEmpty(templateFile) || !File::Exists(templateFile)) {
-        ConsoleX::Err("Usage: skill.exe --dispatch-template <template.json>");
+        ConsoleX::Err("Usage: skill.exe --dispatch-template <template.json> [--episode-number N] [--template-var k=v]...");
         return ExitCodes::BadInput;
     }
     Console::WriteLine();
-    ConsoleX::Banner("VORTEX-OS — Replaying Saved Template");
+    ConsoleX::Banner("VORTEX-OS - Replaying Golden Path Template");
     Console::WriteLine("  Template: " + templateFile);
+    if (episodeNumber >= 1) Console::WriteLine("  Episode:  " + episodeNumber);
     Console::WriteLine();
-    return DispatchV4::Run(p, "template_run", "supervisor.shift", templateFile);
+    return Template::Run(p, templateFile, episodeNumber, overrides, taskId);
+}
+
+// Package one swarm's intermediate deliverables into the project's durable dir
+static int CmdPackage(Paths^ p, String^ swarmId, bool dryRun) {
+    return Packager::Package(p, swarmId, dryRun);
+}
+
+// Append a decision to the durable history (used by the HITL gates on
+// moral-hinge picks so multi-episode dispatches can replay them).
+static int CmdDecisionRecord(Paths^ p, String^ taskId, String^ gate, String^ severity,
+                             String^ choice, String^ reason, int episodeNumber) {
+    if (String::IsNullOrEmpty(gate) || String::IsNullOrEmpty(choice)) {
+        ConsoleX::Err("Usage: skill.exe --decision-record --task <id> --gate <name> --severity <HIGH|CRITICAL|LOW> --choice <text> [--reason <text>] [--episode <N>]");
+        return ExitCodes::BadInput;
+    }
+    int n = Decisions::Append(p, taskId, gate, severity, choice, reason, episodeNumber);
+    ConsoleX::Ok("Recorded decision #" + n + " for gate '" + gate + "': " + choice);
+    return 0;
+}
+
+// Print the decision history as a one-liner-per-row table.
+static int CmdDecisionList(Paths^ p) {
+    ConsoleX::Banner("VORTEX-OS - Decision History");
+    Console::Write(Decisions::FormatTable(p));
+    return 0;
 }
 
 // List pending HITL approval requests
@@ -120,6 +150,15 @@ static int CmdHitlApprove(Paths^ p, String^ taskId) {
         approvedAt);
     File::WriteAllText(f, body);
     ConsoleX::Ok("Approved: " + taskId);
+
+    // Mirror CRITICAL-gate approvals into the durable decision history so
+    // multi-episode dispatches can replay the operator's moral-hinge pick.
+    // Gate 1 / Gate 3 (HIGH severity) are recorded too, but only the
+    // CRITICAL ones are surfaced as {{operator_choice}} on the next episode.
+    if (severity == "CRITICAL") {
+        Decisions::Append(p, taskId, "gate2_moral_hinge", severity, action,
+                          "auto-recorded by --hitl-approve", 0);
+    }
     return 0;
 }
 
@@ -157,6 +196,14 @@ static int CmdHitlDeny(Paths^ p, String^ taskId) {
         deniedAt);
     File::WriteAllText(f, body);
     Console::WriteLine("  ✗ Denied: " + taskId);
+
+    // CRITICAL-gate denials also land in the history (as the operator's
+    // explicit choice to hold the line / off-screen resolution). Template
+    // replays that pull {{operator_choice}} will see "DENY: <reason>".
+    if (severity == "CRITICAL") {
+        Decisions::Append(p, taskId, "gate2_moral_hinge", severity,
+                          "DENY: " + action, "auto-recorded by --hitl-deny", 0);
+    }
     return 0;
 }
 
@@ -199,7 +246,7 @@ static int CmdAuditTrail(Paths^ p) {
 
 // Print the version banner. Matches _meta.json `version` (0.1.0).
 static int CmdVersion() {
-    Console::WriteLine("VORTEX-OS Vortex.dll 0.1.8 (C++/CLI on PowerShell 7+, .NET 10)");
+    Console::WriteLine("VORTEX-OS Vortex.dll 0.1.9 (C++/CLI on PowerShell 7+, .NET 10)");
     return 0;
 }
 
@@ -224,12 +271,22 @@ static int CmdHelp() {
     Console::WriteLine("DISPATCH (the 4-tier chain of command):");
     Console::WriteLine("  --dispatch-master <objective.md>      Submit to T0 General Manager");
     Console::WriteLine("  --dispatch-template <template.json>   Replay a saved Golden Path");
+    Console::WriteLine("       [--episode-number N] [--task <id>] [--template-var k=v]...");
+    Console::WriteLine("       [--protagonist=...] [--antagonist=...] [--setting=...]");
     Console::WriteLine("  --dispatch-v4 <task_id> <agent>       Direct V4 pipeline dispatch");
+    Console::WriteLine();
+    Console::WriteLine("PACKAGING (collect swarm deliverables into project dir):");
+    Console::WriteLine("  --package <swarm_id> [--dry-run]      Copy + write .manifest.json");
     Console::WriteLine();
     Console::WriteLine("HITL (Human-in-the-Loop / Deep-Sleep Safety Gate):");
     Console::WriteLine("  --hitl-status                  List pending approval requests");
     Console::WriteLine("  --hitl-approve <task_id>       Approve a pending request");
     Console::WriteLine("  --hitl-deny <task_id>          Deny a pending request");
+    Console::WriteLine();
+    Console::WriteLine("DECISION HISTORY (operator-driven branching across episodes):");
+    Console::WriteLine("  --decision-record --task <id> --gate <name> --choice <text>");
+    Console::WriteLine("       [--severity HIGH|CRITICAL|LOW] [--reason <text>] [--episode N]");
+    Console::WriteLine("  --decision-list                 Print the decision history table");
     Console::WriteLine();
     Console::WriteLine("INSPECTION:");
     Console::WriteLine("  --inspector-check <task_id>    Run Continuity Engine check");
@@ -242,8 +299,13 @@ static int CmdHelp() {
     Console::WriteLine("  skill.ps1 --agents-discover");
     Console::WriteLine("  skill.ps1 --agents-lint --all");
     Console::WriteLine("  skill.ps1 --dispatch-master my_project\\objective.md");
+    Console::WriteLine("  skill.ps1 --dispatch-template templates\\episode_pattern.json \\");
+    Console::WriteLine("                  --episode-number 2 --protagonist=\"Eira Vance\" \\");
+    Console::WriteLine("                  --antagonist=\"Director Hale\" --setting=\"Solstice Bay\"");
+    Console::WriteLine("  skill.ps1 --package active_golden_path_1700000000");
     Console::WriteLine("  skill.ps1 --hitl-status");
     Console::WriteLine("  skill.ps1 --hitl-approve package_websim");
+    Console::WriteLine("  skill.ps1 --decision-list");
     Console::WriteLine("  skill.ps1 --audit-trail");
     Console::WriteLine();
     return 0;
@@ -310,9 +372,60 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         return CmdDispatchMaster(p, args[1]);
     }
     if (cmd == "--dispatch-template") {
-        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --dispatch-template <template.json>"); return 2; }
-        return CmdDispatchTemplate(p, args[1]);
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --dispatch-template <template.json> [--episode-number N] [--task <id>] [--template-var k=v]..."); return 2; }
+        int ep = 1;
+        String^ taskId = nullptr;
+        List<String^>^ overrides = gcnew List<String^>();
+        for (int i = 2; i < args->Length; i++) {
+            String^ a = args[i];
+            if (a == "--episode-number" && i + 1 < args->Length) {
+                int parsed;
+                if (Int32::TryParse(args[i + 1], parsed)) ep = parsed;
+                i++;
+            } else if (a == "--task" && i + 1 < args->Length) {
+                taskId = args[i + 1]; i++;
+            } else if (a == "--template-var" && i + 1 < args->Length) {
+                overrides->Add(args[i + 1]); i++;
+            } else if (a->StartsWith("--template-var=")) {
+                overrides->Add(a->Substring(15));
+            } else if (a->StartsWith("--")) {
+                // Allow the per-field shortcut: --protagonist=... --antagonist=... --setting=... --diegetic-clock=...
+                if (a->StartsWith("--protagonist=")) overrides->Add("protagonist=" + a->Substring(14));
+                else if (a->StartsWith("--antagonist=")) overrides->Add("antagonist=" + a->Substring(13));
+                else if (a->StartsWith("--setting="))     overrides->Add("setting=" + a->Substring(10));
+                else if (a->StartsWith("--diegetic-clock=")) overrides->Add("diegetic_clock=" + a->Substring(17));
+                else if (a->StartsWith("--episode-title=")) overrides->Add("episode_title=" + a->Substring(16));
+            }
+        }
+        return CmdDispatchTemplate(p, args[1], ep, overrides->ToArray(), taskId);
     }
+    if (cmd == "--package") {
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --package <swarm_id> [--dry-run]"); return 2; }
+        bool dryRun = false;
+        for (int i = 2; i < args->Length; i++) if (args[i] == "--dry-run") dryRun = true;
+        return CmdPackage(p, args[1], dryRun);
+    }
+    if (cmd == "--decision-record") {
+        String^ taskId = nullptr;
+        String^ gate = nullptr;
+        String^ sev = "HIGH";
+        String^ choice = nullptr;
+        String^ reason = nullptr;
+        int ep = 0;
+        for (int i = 1; i < args->Length - 1; i++) {
+            String^ a = args[i];
+            if (a == "--task" || a == "--task-id")            taskId = args[i + 1];
+            else if (a == "--gate")                            gate   = args[i + 1];
+            else if (a == "--severity")                        sev    = args[i + 1];
+            else if (a == "--choice")                          choice = args[i + 1];
+            else if (a == "--reason")                          reason = args[i + 1];
+            else if (a == "--episode" || a == "--episode-number") {
+                int parsed; if (Int32::TryParse(args[i + 1], parsed)) ep = parsed;
+            }
+        }
+        return CmdDecisionRecord(p, taskId, gate, sev, choice, reason, ep);
+    }
+    if (cmd == "--decision-list") return CmdDecisionList(p);
 
     // HITL -------------------------------------------------------------------
     if (cmd == "--hitl-status")  return CmdHitlStatus(p);
