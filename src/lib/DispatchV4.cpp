@@ -8,6 +8,7 @@
 #include "PromptOptimizer.h"
 #include "Commands.h"
 #include "CostTracker.h"
+#include "Audit.h"
 
 namespace Vortex {
 
@@ -22,6 +23,25 @@ namespace Vortex {
     }
 
     int DispatchV4::Run(Paths^ p, String^ taskId, String^ agentName, String^ objectiveRef) {
+        // 0. AUDIT — log the dispatch start before any branching so the
+        // operator can always see "who tried what, when" even when the
+        // pipeline halts at step 1 below.
+        Audit::Emit(
+            p,
+            "T2",
+            agentName == nullptr ? "shift.supervisor" : agentName,
+            "dispatch_start",
+            "received",
+            p->ProjectName,
+            taskId,
+            "LOW",
+            "",
+            "",
+            "",
+            gcnew array<String^> { agentName, taskId },
+            0
+        );
+
         // 1. GOVERNANCE PRE-CHECK
         if (TaskIsHighStakes(p, taskId)) {
             Hitl::YieldForApproval(p, taskId,
@@ -101,6 +121,23 @@ namespace Vortex {
         // The bash version calls record_behavioral_fingerprint + finalize_task_state,
         // both of which are stubs in the original codebase. We log a final line.
         Console::WriteLine("V4_PIPELINE_OK task=" + taskId + " agent=" + agentName);
+        // Audit the dispatch end with the token + duration so the viewer
+        // can correlate cost/timing with each task.
+        Audit::Emit(
+            p,
+            "T2",
+            agentName == nullptr ? "shift.supervisor" : agentName,
+            "dispatch_end",
+            "ok",
+            p->ProjectName,
+            taskId,
+            "LOW",
+            "",
+            "",
+            "",
+            gcnew array<String^> { agentName, taskId, runModel },
+            0
+        );
         return 0;
     }
 }

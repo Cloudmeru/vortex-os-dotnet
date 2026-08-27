@@ -4,6 +4,7 @@
 #include "Hitl.h"
 #include "DispatchV4.h"
 #include "Decisions.h"
+#include "Audit.h"
 
 namespace Vortex {
 
@@ -24,6 +25,38 @@ namespace Vortex {
             JsonX::EscapeJson(proposedAction),
             ts);
         File::WriteAllText(checkpointFile, body);
+
+        // Emit an audit line so the operator can review every halt in
+        // `Get-VortexAuditTrail` without re-scanning the pending_approvals
+        // directory. severity is already normalized to HIGH/CRITICAL/etc.
+        // above (line 11), and the gate id follows the convention used by
+        // the bash version: "gate<n>_<short>" where n=1 for HIGH, n=2 for
+        // CRITICAL, n=3 for LOW. We use taskId as the gate id proxy here
+        // so the viewer's HITL filter matches the task the operator was
+        // actually asked about.
+        String^ gateId = "gate_hitl_" + taskId;
+        if (severity == "CRITICAL") {
+            gateId = "gate2_moral_hinge";
+        } else if (severity == "HIGH") {
+            gateId = "gate1_script";
+        } else if (severity == "LOW") {
+            gateId = "gate3_pack";
+        }
+        Audit::Emit(
+            p,
+            "T2",                          // tier
+            "shift.packaging",             // agent
+            "hitl_request",                // action
+            "PENDING_HUMAN",               // status
+            p->ProjectName,                // project
+            taskId,                        // task_id
+            severity,                      // severity
+            "",                            // rule_violated
+            "",                            // rule_fixed
+            gateId,                        // gate_id
+            gcnew array<String^> { "hitl", taskId }, // tags
+            0                              // episode_number
+        );
 
         Console::WriteLine();
         Console::WriteLine("**Approval Required (Task Context: " + taskId + ") [Severity: " + severity + "]**");

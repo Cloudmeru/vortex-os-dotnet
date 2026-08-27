@@ -2,12 +2,33 @@
 // VORTEX-OS — Prompt Optimizer Module implementation
 // =============================================================================
 #include "PromptOptimizer.h"
+#include "Audit.h"
 
 namespace Vortex {
 
     int PromptOptimizer::OptimizeAgent(Paths^ p, String^ agentName, String^ failedOutput, String^ failureReason) {
         String^ agentFile = Path::Combine(p->AgentsDir, agentName + ".json");
-        if (!File::Exists(agentFile)) return 1;
+        if (!File::Exists(agentFile)) {
+            // Audit the FAIL path so the operator can see when the optimizer
+            // was asked to patch an agent that doesn't exist (typically
+            // because the dispatch hit a path mismatch).
+            Audit::Emit(
+                p,
+                "T2",
+                "prompt.optimizer",
+                "self_heal",
+                "fail",
+                p->ProjectName,
+                "",
+                "MEDIUM",
+                "agent_file_missing",
+                "",
+                "",
+                gcnew array<String^> { "selfheal", agentName },
+                0
+            );
+            return 1;
+        }
 
         ConsoleColor prev = Console::ForegroundColor;
         Console::ForegroundColor = ConsoleColor::Yellow;
@@ -90,8 +111,50 @@ namespace Vortex {
             Console::ForegroundColor = ConsoleColor::Green;
             Console::WriteLine("[OPTIMIZER] Successfully updated prompt architecture for " + agentName + ".");
             Console::ForegroundColor = prev;
+
+            // Audit the self-heal cycle: which rule was violated, what
+            // patch was applied. The viewer uses these to render the
+            // "selfheal" sub-view (violation -> fix pair).
+            // Heuristic: the failure reason drives both the rule name
+            // (snake_case first 40 chars) and the fix marker.
+            String^ violated = String::IsNullOrEmpty(failureReason) ? "unspecified" : failureReason;
+            if (violated->Length > 40) violated = violated->Substring(0, 40);
+            violated = violated->ToLower()->Replace(' ', '_')->Replace('-', '_');
+            Audit::Emit(
+                p,
+                "T2",
+                "prompt.optimizer",
+                "self_heal",
+                "ok",
+                p->ProjectName,
+                "",
+                "MEDIUM",
+                violated,
+                "strict_prompt_v1",
+                "",
+                gcnew array<String^> { "selfheal", agentName, violated },
+                0
+            );
             return 0;
         }
+        // No description -> nothing to patch. Audit the no-op so the
+        // viewer can distinguish "self-heal skipped" from "self-heal
+        // never invoked".
+        Audit::Emit(
+            p,
+            "T2",
+            "prompt.optimizer",
+            "self_heal",
+            "fail",
+            p->ProjectName,
+            "",
+            "MEDIUM",
+            "missing_description",
+            "",
+            "",
+            gcnew array<String^> { "selfheal", agentName },
+            0
+        );
         return 1;
     }
 }

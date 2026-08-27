@@ -3,6 +3,7 @@
 // =============================================================================
 #include "Inspector.h"
 #include "Hitl.h"
+#include "Audit.h"
 
 namespace Vortex {
 
@@ -63,12 +64,46 @@ namespace Vortex {
                 Console::ForegroundColor = ConsoleColor::Red;
                 Console::WriteLine("[INSPECTOR INTERVENTION] Flagging execution loop anomaly: " + auditVerdict);
                 Console::ForegroundColor = prev;
+                // Audit the inspector intervention before the HITL halt so
+                // Get-VortexAuditTrail's "selfheal"-flavoured view shows the
+                // full sequence: token_audit (warn) -> hitl_request.
+                Audit::Emit(
+                    p,
+                    "T2",
+                    "inspector.governance",
+                    "token_audit",
+                    "warn",
+                    p->ProjectName,
+                    taskId,
+                    "HIGH",
+                    "token_burn_velocity_exceeded",
+                    "",
+                    "",
+                    gcnew array<String^> { "inspector", agentName, taskId },
+                    0
+                );
                 Hitl::YieldForApproval(p, taskId,
                     "The Inspector Tier forced a halt due to compute budget inefficiency: " + auditVerdict,
                     "CRITICAL_BUDGET");
                 return 1;
             }
         }
+        // Pass: log a token_audit OK so the operator can grep for the run.
+        Audit::Emit(
+            p,
+            "T2",
+            "inspector.governance",
+            "token_audit",
+            "ok",
+            p->ProjectName,
+            taskId,
+            "LOW",
+            "",
+            "",
+            "",
+            gcnew array<String^> { "inspector", agentName, taskId },
+            0
+        );
         return 0;
     }
 }
