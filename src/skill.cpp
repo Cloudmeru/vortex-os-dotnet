@@ -21,6 +21,7 @@
 #include "lib/Decisions.h"
 #include "lib/Template.h"
 #include "lib/Packager.h"
+#include "lib/CostTracker.h"
 
 using namespace Vortex;
 using namespace System::Text::Json;
@@ -85,6 +86,97 @@ static int CmdDecisionRecord(Paths^ p, String^ taskId, String^ gate, String^ sev
 static int CmdDecisionList(Paths^ p) {
     ConsoleX::Banner("VORTEX-OS - Decision History");
     Console::Write(Decisions::FormatTable(p));
+    return 0;
+}
+
+// Cost report: by project, optionally filtered by --since and --agent.
+static int CmdCostReport(Paths^ p, String^ project, long sinceUnix, String^ agent, bool asJson) {
+    if (asJson) {
+        Console::WriteLine(CostTracker::FormatReport(p, project, sinceUnix, true));
+    } else {
+        ConsoleX::Banner("VORTEX-OS - Cost Report");
+        Console::Write(CostTracker::FormatReport(p, project, sinceUnix, false));
+    }
+    return 0;
+}
+
+// Manual cost record (for one-off dispatches not in the V4 pipeline)
+static int CmdCostRecord(Paths^ p, String^ taskId, String^ agent, String^ model,
+                         int tokensIn, int tokensOut, int durationMs, String^ tags) {
+    if (String::IsNullOrEmpty(taskId) || String::IsNullOrEmpty(agent) || String::IsNullOrEmpty(model)) {
+        ConsoleX::Err("Usage: --cost-record --task <id> --agent <name> --model <name> --tokens-in N --tokens-out N [--duration-ms N] [--tags t1,t2]");
+        return ExitCodes::BadInput;
+    }
+    String^ project = String::IsNullOrEmpty(p->ProjectName) ? "_unfiled" : p->ProjectName;
+    array<String^>^ tagArr = String::IsNullOrEmpty(tags)
+        ? gcnew array<String^>(0)
+        : tags->Split(',');
+    double cost = CostTracker::RecordTokens(p, taskId, agent, project, model,
+                                            tokensIn, tokensOut, durationMs, tagArr);
+    ConsoleX::Ok("Recorded: task=" + taskId + " agent=" + agent + " model=" + model +
+        " tokens=" + (tokensIn + tokensOut) + " cost=$" + cost.ToString("F6"));
+    // Also check the budget — the same gate the V4 pipeline would raise.
+    CostTracker::CheckBudget(p, project, taskId);
+    return 0;
+}
+
+// Cost estimate: compute cost for a given model + token counts without recording
+static int CmdCostEstimate(Paths^ p, String^ model, int tokensIn, int tokensOut) {
+    if (String::IsNullOrEmpty(model)) {
+        ConsoleX::Err("Usage: --cost-estimate --model <name> --tokens-in N --tokens-out N");
+        return ExitCodes::BadInput;
+    }
+    double cost = CostTracker::ComputeCost(p, model, tokensIn, tokensOut);
+    Console::WriteLine("  Model:     " + model);
+    Console::WriteLine("  Tokens:    " + (tokensIn + tokensOut) + " (in=" + tokensIn + ", out=" + tokensOut + ")");
+    Console::WriteLine("  Cost USD:  $" + cost.ToString("F6"));
+    return 0;
+}
+
+// Set a project budget (writes to <project>/_meta.json or .vortex/budgets.json)
+static int CmdBudgetSet(Paths^ p, String^ project, long tokensTotal, double usdTotal) {
+    if (String::IsNullOrEmpty(project)) {
+        ConsoleX::Err("Usage: --budget-set --project <name> [--tokens-total N] [--usd-total N]");
+        return ExitCodes::BadInput;
+    }
+    if (tokensTotal == 0 && usdTotal == 0) {
+        ConsoleX::Err("At least one of --tokens-total or --usd-total must be set.");
+        return ExitCodes::BadInput;
+    }
+    // Write to the project's _meta.json (per-project budget)
+    String^ projectDir = String::IsNullOrEmpty(p->ProjectName)
+        ? p->DeliverablesDir
+        : p->ProjectDeliverablesDir;
+    if (!Directory::Exists(projectDir)) Directory::CreateDirectory(projectDir);
+    String^ projectMeta = Path::Combine(projectDir, "_meta.json");
+    JsonDocument^ doc = JsonX::ReadFile(projectMeta);
+    JsonElement root = (doc != nullptr) ? doc->RootElement.Clone() : JsonDocument::Parse("{}")->RootElement.Clone();
+    String^ json = String::Format(
+        "{{\"name\":\"{0}\",\"budgets\":{{\"tokens_total\":{1},\"usd_total\":{2}}}}}",
+        JsonX::EscapeJson(project), tokensTotal, usdTotal.ToString("F6", System::Globalization::CultureInfo::InvariantCulture));
+    File::WriteAllText(projectMeta, json);
+    ConsoleX::Ok("Set budget for project '" + project + "': tokens_total=" + tokensTotal + " usd_total=$" + usdTotal.ToString("F2"));
+    return 0;
+}
+
+// Show the active budget for a project
+static int CmdBudgetShow(Paths^ p, String^ project) {
+    if (String::IsNullOrEmpty(project)) {
+        ConsoleX::Err("Usage: --budget-show --project <name>");
+        return ExitCodes::BadInput;
+    }
+    long tokensTotal = 0;
+    double usdTotal = 0.0;
+    CostTracker::ResolveBudget(p, project, tokensTotal, usdTotal);
+    double soFar = CostTracker::ProjectCostSoFar(p, project);
+    ConsoleX::Banner("Budget: " + project);
+    Console::WriteLine("  tokens_total: " + tokensTotal);
+    Console::WriteLine("  usd_total:    $" + usdTotal.ToString("F2"));
+    Console::WriteLine("  so_far:       $" + soFar.ToString("F6"));
+    if (usdTotal > 0) {
+        double pct = soFar / usdTotal * 100.0;
+        Console::WriteLine("  used:         " + pct.ToString("F1") + "%");
+    }
     return 0;
 }
 
@@ -246,7 +338,7 @@ static int CmdAuditTrail(Paths^ p) {
 
 // Print the version banner. Matches _meta.json `version` (0.1.0).
 static int CmdVersion() {
-    Console::WriteLine("VORTEX-OS Vortex.dll 0.1.9 (C++/CLI on PowerShell 7+, .NET 10)");
+    Console::WriteLine("VORTEX-OS Vortex.dll 0.1.10 (C++/CLI on PowerShell 7+, .NET 10)");
     return 0;
 }
 
@@ -426,6 +518,98 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         return CmdDecisionRecord(p, taskId, gate, sev, choice, reason, ep);
     }
     if (cmd == "--decision-list") return CmdDecisionList(p);
+
+    // Cost tracking ------------------------------------------------------------
+    if (cmd == "--cost-report") {
+        String^ proj = nullptr;
+        long since = 0;
+        String^ agent = nullptr;
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            String^ a = args[i];
+            if (a == "--project" && i + 1 < args->Length)        { proj  = args[i + 1]; i++; }
+            else if (a == "--agent" && i + 1 < args->Length)     { agent = args[i + 1]; i++; }
+            else if (a == "--json")                              { asJson = true; }
+            else if (a->StartsWith("--since=")) {
+                String^ s = a->Substring(8);
+                if (s->EndsWith("d") && s->Length > 1) {
+                    // --since=Nd -> N days ago
+                    int n;
+                    if (Int32::TryParse(s->Substring(0, s->Length - 1), n)) {
+                        Int64 now = DateTime::UtcNow.Subtract(DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind::Utc)).TotalSeconds;
+                        since = (long)(now - (Int64)n * 86400);
+                    }
+                } else {
+                    Int64 tmp;
+                    if (Int64::TryParse(s, tmp)) since = (long)tmp;
+                }
+            }
+        }
+        return CmdCostReport(p, proj == nullptr ? "" : proj, since, agent == nullptr ? "" : agent, asJson);
+    }
+    if (cmd == "--cost-record") {
+        String^ taskId = nullptr;
+        String^ agent  = nullptr;
+        String^ model  = nullptr;
+        String^ tags   = nullptr;
+        int tokIn = 0;
+        int tokOut = 0;
+        int durMs = 0;
+        for (int i = 1; i < args->Length - 1; i++) {
+            String^ a = args[i];
+            if (a == "--task")             taskId = args[i + 1];
+            else if (a == "--agent")        agent  = args[i + 1];
+            else if (a == "--model")        model  = args[i + 1];
+            else if (a == "--tokens-in")    { int tmp; if (Int32::TryParse(args[i + 1], tmp)) tokIn  = tmp; }
+            else if (a == "--tokens-out")   { int tmp; if (Int32::TryParse(args[i + 1], tmp)) tokOut = tmp; }
+            else if (a == "--duration-ms")  { int tmp; if (Int32::TryParse(args[i + 1], tmp)) durMs  = tmp; }
+            else if (a == "--tags")         tags   = args[i + 1];
+        }
+        return CmdCostRecord(p, taskId, agent, model, tokIn, tokOut, durMs, tags);
+    }
+    if (cmd == "--cost-estimate") {
+        String^ model = nullptr;
+        int tokIn = 0;
+        int tokOut = 0;
+        for (int i = 1; i < args->Length - 1; i++) {
+            String^ a = args[i];
+            if (a == "--model")        model  = args[i + 1];
+            else if (a == "--tokens-in")  { int tmp; if (Int32::TryParse(args[i + 1], tmp)) tokIn  = tmp; }
+            else if (a == "--tokens-out") { int tmp; if (Int32::TryParse(args[i + 1], tmp)) tokOut = tmp; }
+        }
+        return CmdCostEstimate(p, model, tokIn, tokOut);
+    }
+    if (cmd == "--cost-estimate") {
+        String^ model = nullptr;
+        int tokIn = 0, tokOut = 0;
+        for (int i = 1; i < args->Length - 1; i++) {
+            String^ a = args[i];
+            if (a == "--model")        model  = args[i + 1];
+            else if (a == "--tokens-in")  Int32::TryParse(args[i + 1], tokIn);
+            else if (a == "--tokens-out") Int32::TryParse(args[i + 1], tokOut);
+        }
+        return CmdCostEstimate(p, model, tokIn, tokOut);
+    }
+    if (cmd == "--budget-set") {
+        String^ proj = nullptr;
+        Int64 tokTotal = 0;
+        double usdTotal = 0.0;
+        for (int i = 1; i < args->Length - 1; i++) {
+            String^ a = args[i];
+            if (a == "--project")        proj = args[i + 1];
+            else if (a == "--tokens-total")  { Int64 tmp; if (Int64::TryParse(args[i + 1], tmp)) tokTotal = tmp; }
+            else if (a == "--usd-total")     Double::TryParse(args[i + 1], System::Globalization::NumberStyles::Float,
+                                                            System::Globalization::CultureInfo::InvariantCulture, usdTotal);
+        }
+        return CmdBudgetSet(p, proj, (long)tokTotal, usdTotal);
+    }
+    if (cmd == "--budget-show") {
+        String^ proj = nullptr;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--project" && i + 1 < args->Length) { proj = args[i + 1]; break; }
+        }
+        return CmdBudgetShow(p, proj);
+    }
 
     // HITL -------------------------------------------------------------------
     if (cmd == "--hitl-status")  return CmdHitlStatus(p);

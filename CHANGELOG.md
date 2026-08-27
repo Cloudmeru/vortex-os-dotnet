@@ -4,6 +4,62 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.1.10] — 2026-08-27
+
+### Added
+- **Cost / token budgeting** (`lib/CostTracker.{h,cpp}`). Records every
+  dispatch's prompt + completion token counts and USD cost to
+  `state/cost_log.jsonl`. Computes cost from `.vortex/model_prices.json`
+  (a static per-model price table; unknown models fall back to
+  `default`). Pure file I/O, no network.
+- **Per-project budget resolution** (`CostTracker::ResolveBudget`).
+  Priority: `$env:VORTEX_BUDGET_USD_TOTAL` → project `_meta.json`'s
+  `budgets.usd_total` → `$VORTEX_HOME/.vortex/budgets.json`'s
+  `default_usd_total` → 0 (no budget).
+- **80% / 100% budget alerts**. After every dispatch (or `--cost-record`),
+  if the project's running cost is at 80% of its budget, the engine yields
+  a PENDING_HUMAN gate (severity MEDIUM). At 100% the gate is CRITICAL.
+  Alerts are rate-limited to once per day per project via a flag file
+  at `.vortex/budget_alert_{80,100}_{project}_{yyyymmdd}.flag`.
+- **New CLI commands**:
+  - `--cost-estimate --model <name> --tokens-in N --tokens-out N`
+    — compute cost for a given model + tokens, no recording.
+  - `--cost-record --task <id> --agent <name> --model <name>
+     --tokens-in N --tokens-out N [--duration-ms N] [--tags t1,t2]`
+    — append a cost entry to the log. Also triggers CheckBudget.
+  - `--cost-report [--project <name>] [--since <Nd>] [--agent <name>]
+     [--json]` — formatted text or JSON cost rollup.
+  - `--budget-set --project <name> [--tokens-total N] [--usd-total N]`
+    — write a per-project budget to `deliverables/<project>/_meta.json`.
+  - `--budget-show --project <name>` — show tokens_total, usd_total,
+    so_far, % used.
+- **`DispatchV4::Run` integration.** After the standard execution
+  pass, the V4 pipeline now calls `CostTracker::RecordTokens` with the
+  metrics read from `state/tmp/raw_output_<task>.json` (new fields:
+  `model`, `tokens_in`, `duration_ms` alongside the existing
+  `tokens_out`). Then `CostTracker::CheckBudget` is called.
+
+### Changed
+- **Version bump** to 0.1.10 (banner string + Vortex.psd1 ModuleVersion).
+- **`src/build.ps1`** adds `lib/CostTracker.cpp` to the source list.
+- **`lib/DispatchV4.cpp`** reads new metric fields from the raw output
+  JSON (`metrics.tokens_in`, `metrics.model`, `metrics.duration_ms`).
+- **`lib/Packager.cpp`** writes `"engine_version": "0.1.10"` (was 0.1.9).
+- **Skill-side `skill.ps1`**: removed the `[string] $Project` param to
+  prevent PowerShell's auto-binding from intercepting the engine's
+  `--project` flag. Users now set the project via `$env:VORTEX_PROJECT`
+  (which the engine already reads in `ResolveProjectName`).
+
+### Tests
+- **`tests/test_engine.ps1`** now has **59 assertions** (up from 33).
+  18 new assertions cover the cost / budget flow end-to-end:
+  setup-cost.ps1 generates the default price + budget files;
+  --cost-estimate returns the right USD value; --cost-record appends
+  a valid JSONL line; --cost-report shows the project + per-agent
+  breakdown; --cost-report --json returns valid JSON; --budget-set
+  writes the project _meta.json; --budget-show reads it back; the 100%
+  alert flag is written when the budget is exceeded.
+
 ## [0.1.9] — 2026-08-22
 
 ### Added

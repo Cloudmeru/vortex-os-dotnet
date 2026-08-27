@@ -7,6 +7,7 @@
 #include "Inspector.h"
 #include "PromptOptimizer.h"
 #include "Commands.h"
+#include "CostTracker.h"
 
 namespace Vortex {
 
@@ -47,17 +48,33 @@ namespace Vortex {
         // to inspect.
         String^ rawFile = Path::Combine(p->TmpDir, "raw_output_" + taskId + ".json");
         if (!File::Exists(rawFile)) {
-            File::WriteAllText(rawFile, "{\"metrics\":{\"tokens_out\":0}}");
+            File::WriteAllText(rawFile, "{\"metrics\":{\"model\":\"MiniMax-Text-01\",\"tokens_in\":0,\"tokens_out\":0,\"duration_ms\":0}}");
         }
         JsonDocument^ raw = JsonX::ReadFile(rawFile);
         int runTokens = 0;
+        int runTokensIn = 0;
+        String^ runModel = "MiniMax-Text-01";
+        int runDurationMs = 0;
         if (raw != nullptr && JsonX::Has(raw->RootElement, "metrics")) {
             JsonElement metrics = raw->RootElement.GetProperty("metrics");
             if (JsonX::Has(metrics, "tokens_out")) {
                 JsonElement t = metrics.GetProperty("tokens_out");
-                if (t.ValueKind == JsonValueKind::Number) {
-                    runTokens = t.GetInt32();
+                if (t.ValueKind == JsonValueKind::Number) runTokens = t.GetInt32();
+            }
+            if (JsonX::Has(metrics, "tokens_in")) {
+                JsonElement t = metrics.GetProperty("tokens_in");
+                if (t.ValueKind == JsonValueKind::Number) runTokensIn = t.GetInt32();
+            }
+            if (JsonX::Has(metrics, "model")) {
+                JsonElement m = metrics.GetProperty("model");
+                if (m.ValueKind == JsonValueKind::String) {
+                    String^ mv = m.GetString();
+                    if (!String::IsNullOrEmpty(mv)) runModel = mv;
                 }
+            }
+            if (JsonX::Has(metrics, "duration_ms")) {
+                JsonElement d = metrics.GetProperty("duration_ms");
+                if (d.ValueKind == JsonValueKind::Number) runDurationMs = d.GetInt32();
             }
         }
 
@@ -72,7 +89,15 @@ namespace Vortex {
             return 1;
         }
 
-        // 6. PIPELINE FINALIZATION
+        // 6. COST TRACKING (v0.1.10+) — record tokens + cost, check budget.
+        // Pure file I/O; never fails the dispatch. Budget alerts surface as
+        // PENDING_HUMAN gates via Hitl::YieldForApproval (Environment::Exit(203)).
+        array<String^>^ tags = gcnew array<String^> { agentName, p->ProjectName };
+        CostTracker::RecordTokens(p, taskId, agentName, p->ProjectName,
+                                  runModel, runTokensIn, runTokens, runDurationMs, tags);
+        CostTracker::CheckBudget(p, p->ProjectName, taskId);
+
+        // 7. PIPELINE FINALIZATION
         // The bash version calls record_behavioral_fingerprint + finalize_task_state,
         // both of which are stubs in the original codebase. We log a final line.
         Console::WriteLine("V4_PIPELINE_OK task=" + taskId + " agent=" + agentName);
