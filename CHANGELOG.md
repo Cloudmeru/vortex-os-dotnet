@@ -4,6 +4,106 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.2.2] — 2026-08-27
+
+### Added — PRD-10 Multi-user team mode
+- **`PathResolver::ApplyTeamConfig`** reads `$VORTEX_HOME/.vortex/config.json`
+  at startup and shards paths per-user when `team_mode` is on. The per-user
+  shards are `state/<user>/`, `memory/audit-<user>.jsonl`, and
+  `tasks/<user>/`. Deliverables stay shared so the team sees everyone's
+  output in one place.
+- **New Paths fields**: `AuditLogFile`, `PendingApprovalsDir`, `InProgressDir`
+  on the `Paths` class so `Audit::Emit`, `Hitl::YieldForApproval`, and
+  `StreamSink::*` can read the resolved path without re-implementing the
+  sharding logic.
+- **`lib/FileLock.cpp` (FileLock class)** — read-with-lock / write-with-lock
+  / append-with-lock helpers around the `LockAttempt` ref class. The lock
+  is an OS file lock on `<path>.lock` with a 100ms poll and 50-attempt cap
+  (configurable). `Audit::Emit`, `Hitl::YieldForApproval`, and
+  `Decisions::Append` now use `FileLock::*WithLock` so concurrent operators
+  on the same VORTEX_HOME never interleave audit lines.
+- **New CLI command**: `--team-config` — prints the loaded config + the
+  resolved paths so the operator can verify sharding is working.
+
+### Added — PRD-14 Streaming / partial results
+- **`lib/StreamSink.{h,cpp}`** — the streaming sink.
+  - `OnDispatchStart(p, taskId, agent)` writes `<InProgressDir>/<id>/.started`.
+  - `OnDeliverableReady(p, taskId, name, filePath)` copies the deliverable
+    to `<InProgressDir>/<id>/<name>.partial<ext>` + writes a sidecar
+    `.json` manifest with size, timestamp, source.
+  - `OnDeliverableProgress(p, taskId, name, percent)` writes a sidecar
+    `.progress.json` for operators who want finer-grained progress.
+  - `OnDispatchEnd(p, taskId, projectName, status)` writes the
+    `.completed` manifest, moves `.partial` files into
+    `deliverables/<project>/`, moves the `.completed` into the same dir,
+    and cleans up the in_progress task dir.
+  - `AppendHint(p, taskId, text)` / `ReadHints` — operator hints
+    append to `<InProgressDir>/<id>/.hints.jsonl` so the next dispatch
+    in the chain picks them up as "operator notes" in the prompt.
+  - `ListInProgress(p)` — returns the task_ids of every dir under
+    `<InProgressDir>/` that contains a `.started` manifest.
+- **DispatchV4::Run** now wires `StreamSink::OnDispatchStart` /
+  `OnDispatchEnd` around each dispatch. Long-running dispatches can
+  stream partial results to the operator in real time.
+- **New CLI commands**:
+  - `--stream-list` — table of in-progress dispatches + the resolved
+    `in_progress: <path>` line so operators know where the `.partial`
+    files live.
+  - `--stream <task_id> [--auto-open]` — engine-side stub that lists
+    the partial files for the task. The skill's `lib/Vortex.Streamer.psm1`
+    does the real FileSystemWatcher + interactive y/n/q prompt.
+  - `--stream-stop <task_id>` — confirm the in_progress dir exists.
+  - `--hint <task_id> --text "..."` — append a hint via
+    `StreamSink::AppendHint`.
+  - `--stream-finalize <task_id>` — manually trigger `OnDispatchEnd`
+    to move `.partial` files into the project's deliverables dir.
+    Useful when a dispatch was aborted but the operator still wants
+    the partial deliverables.
+
+### Changed
+- **`Audit::Emit`, `Hitl::YieldForApproval`, `Decisions::Append`** now
+  use `FileLock::*WithLock` so concurrent writers never interleave.
+  `Audit::Emit` reads the per-user `AuditLogFile` from `Paths` instead
+  of computing the shared `memory/audit.jsonl` directly.
+- **`--stream-list` output** adds an `in_progress: <path>` line so the
+  operator knows where the `.partial` files live (and so the test
+  harness can assert the path).
+
+### Fixed
+- `OnDispatchEnd` now always moves `.partial` files (it was previously
+  gated on `projectName != ""`, which made the test-helper
+  `--stream-finalize` silently no-op when no project was set).
+- `OnDispatchEnd` now cleans up the in_progress task dir after the
+  move (was leaving the dir behind as clutter).
+
+## [0.2.1] — 2026-08-27
+
+### Added
+- **`--plugin-install <github-url> [--name <plugin-name>]`** command.
+  Parses the URL (https://github.com/owner/repo, git@github.com:owner/repo,
+  or bare owner/repo), downloads the tarball via `curl.exe` (Windows
+  ships with it), extracts via `tar.exe -xzf --strip-components=1` into
+  `$VORTEX_HOME/plugins/<name>/`, validates `plugin.json` + entry file,
+  audits the install event, cleans up partial folders + tarball on
+  failure. Pure C++/CLI — no PowerShell, no NuGet packages, no .NET
+  HTTP client. Uses `Process::Start` to shell out to curl + tar.
+- **11 more reference plugins** (total 17) — see the skill's
+  `plugins/` directory.
+
+## [0.2.0] — 2026-08-27
+
+### Added
+- **Engine plugin system (PRD-11).** New `lib/Plugin.{h,cpp}` is the
+  engine plugin invoker. Plugins are PowerShell scripts discovered at
+  runtime from `$VORTEX_HOME/plugins/` + `<skill>/plugins/`. A new
+  worker is a 30-minute PowerShell plugin instead of a 3-day engine
+  fork.
+- **5 new CLI commands**: `--plugins-list`, `--plugins-info <name>`,
+  `--plugin-test <name>`, `--plugin-remove <name>`, `--plugin-invoke <name>`.
+- **6 reference plugins** (text-writer, text-editor, audio-foley,
+  image-portrait, code-typescript, media-ffmpeg) — see the skill's
+  `plugins/` directory.
+
 ## [0.1.10] — 2026-08-27
 
 ### Added

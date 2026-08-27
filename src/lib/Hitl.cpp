@@ -1,5 +1,6 @@
 // =============================================================================
-// VORTEX-OS - HITL Module implementation
+// VORTEX-OS - HITL Module implementation (v0.2.2 with file locking +
+// team-mode path sharding)
 // =============================================================================
 #include "Hitl.h"
 #include "DispatchV4.h"
@@ -11,7 +12,9 @@ namespace Vortex {
     void Hitl::YieldForApproval(Paths^ p, String^ taskId, String^ proposedAction, String^ severity) {
         if (String::IsNullOrEmpty(severity)) severity = "HIGH";
 
-        String^ pendingDir = Path::Combine(p->StateDir, "pending_approvals");
+        // v0.2.2: respect the team-mode sharded PendingApprovalsDir
+        // (defaults to <StateDir>/pending_approvals).
+        String^ pendingDir = p->PendingApprovalsDir;
         Directory::CreateDirectory(pendingDir);
 
         String^ checkpointFile = Path::Combine(pendingDir, taskId + ".json");
@@ -24,7 +27,12 @@ namespace Vortex {
             JsonX::EscapeJson(severity),
             JsonX::EscapeJson(proposedAction),
             ts);
-        File::WriteAllText(checkpointFile, body);
+        // v0.2.2: write under a file lock so two concurrent operators
+        // approving the same checkpoint don't lose one approval.
+        bool ok = FileLock::WriteWithLock(checkpointFile, body, 50, 10);
+        if (!ok) {
+            try { File::WriteAllText(checkpointFile, body); } catch (Exception^) {}
+        }
 
         // Emit an audit line so the operator can review every halt in
         // `Get-VortexAuditTrail` without re-scanning the pending_approvals
@@ -70,7 +78,7 @@ namespace Vortex {
     }
 
     int Hitl::ResumeApprovedTask(Paths^ p, String^ taskId) {
-        String^ checkpointFile = Path::Combine(p->StateDir, "pending_approvals", taskId + ".json");
+        String^ checkpointFile = Path::Combine(p->PendingApprovalsDir, taskId + ".json");
         if (!File::Exists(checkpointFile)) return 1;
 
         JsonDocument^ doc = JsonX::ReadFile(checkpointFile);

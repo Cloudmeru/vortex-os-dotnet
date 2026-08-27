@@ -1,5 +1,5 @@
 // =============================================================================
-// VORTEX-OS — Audit Module implementation
+// VORTEX-OS — Audit Module implementation (v0.2.0 + v0.2.2 file locking)
 // =============================================================================
 #include "Audit.h"
 
@@ -27,7 +27,12 @@ namespace Vortex {
             if (String::IsNullOrEmpty(memoryDir)) return;
             Directory::CreateDirectory(memoryDir);
 
-            String^ log = Path::Combine(memoryDir, "audit.jsonl");
+            // v0.2.2: respect the team-mode sharded AuditLogFile field
+            // (defaults to <memoryDir>/audit.jsonl if ApplyTeamConfig
+            // didn't set it).
+            String^ log = String::IsNullOrEmpty(p->AuditLogFile)
+                ? Path::Combine(memoryDir, "audit.jsonl")
+                : p->AuditLogFile;
 
             // Build one JSONL line. Order of fields matches the schema doc.
             String^ ts = DateTime::Now.ToString(
@@ -70,15 +75,13 @@ namespace Vortex {
             sb->Append('}');
             sb->Append("\n");
 
-            // Append the line. StreamWriter opens in append mode and stays
-            // open for the lifetime of the call so successive Emit() calls
-            // are O(1) amortized.
-            StreamWriter^ sw = nullptr;
-            try {
-                sw = gcnew StreamWriter(log, true, Encoding::UTF8);
-                sw->Write(sb->ToString());
-            } finally {
-                if (sw != nullptr) { sw->Close(); }
+            // v0.2.2: append under a file lock so two concurrent writers
+            // (e.g. team mode) don't interleave. Fall back to a direct
+            // File::AppendAllText if the lock fails (best-effort).
+            String^ line = sb->ToString();
+            bool ok = FileLock::AppendWithLock(log, line, 50, 10);
+            if (!ok) {
+                try { File::AppendAllText(log, line); } catch (Exception^) {}
             }
         } catch (Exception^) {
             // Swallow — auditing is best-effort.

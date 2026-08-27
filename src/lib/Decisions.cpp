@@ -1,5 +1,5 @@
 // =============================================================================
-// VORTEX-OS - Decision History Module implementation
+// VORTEX-OS - Decision History Module implementation (v0.2.2 with file locking)
 // =============================================================================
 #include "Decisions.h"
 
@@ -42,9 +42,14 @@ namespace Vortex {
         lines->Add("  " + entry);
         lines->Add("]");
         String^ joined = String::Join("\n", lines->ToArray());
-        // Atomic write: write to .tmp, then move into place.
+        // Atomic write: write to .tmp, then move into place. v0.2.2: the
+        // .tmp write is under a file lock so two concurrent Appends don't
+        // stomp on each other's temp file.
         String^ tmp = f + ".tmp";
-        File::WriteAllText(tmp, joined);
+        bool ok = FileLock::WriteWithLock(tmp, joined, 50, 10);
+        if (!ok) {
+            try { File::WriteAllText(tmp, joined); } catch (Exception^) {}
+        }
         if (File::Exists(f)) File::Delete(f);
         File::Move(tmp, f);
         // Count

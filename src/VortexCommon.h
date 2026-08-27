@@ -26,180 +26,9 @@ using namespace System::Globalization;
 namespace Vortex {
 
     // -------------------------------------------------------------------------
-    // Paths (resolved at runtime from two roots)
-    // -------------------------------------------------------------------------
-    // Starting with v0.1.7, the engine distinguishes between two roots so
-    // that user-facing outputs survive skill updates:
-    //
-    //   * SkillDir  (mutable)   - the skill folder. Holds agents/ and
-    //                              templates/. Gets replaced when the skill
-    //                              is updated. Same dir as the .psm1/.psd1.
-    //   * HomeDir   (durable)   - the user's VORTEX_HOME. Holds state/,
-    //                              memory/, swarms/, deliverables/, tasks/.
-    //                              Persists across skill updates. Shared
-    //                              across multiple skill instances on the
-    //                              same machine (default: %APPDATA%\Vortex-OS).
-    //
-    // The PowerShell wrapper passes SkillDir as the first arg to
-    // Vortex.Skill::Run(); the engine reads HomeDir from $env:VORTEX_HOME
-    // (with a default of %APPDATA%\Vortex-OS).
-    //
-    // For backward compatibility, PathResolver::Resolve(path) treats
-    // `path` as BOTH roots (i.e. legacy single-root behavior). New code
-    // should call PathResolver::Resolve(skillDir, homeDir).
-    public ref struct Paths sealed {
-        // The two roots.
-        String^ SkillDir;         // mutable (the skill folder)
-        String^ HomeDir;          // durable (VORTEX_HOME, default %APPDATA%\Vortex-OS)
-
-        // Legacy alias: many call sites still use p->RootDir. Map it to
-        // HomeDir so the durable state location wins.
-        String^ RootDir;          // == HomeDir (backward compat)
-
-        // Skill-scope paths (under SkillDir). Replaced on skill update.
-        String^ AgentsDir;        // <SkillDir>/agents
-        String^ TemplatesDir;     // <SkillDir>/templates
-
-        // Home-scope paths (under HomeDir). Survive skill updates.
-        String^ StateDir;         // <HomeDir>/state
-        String^ MemoryDir;        // <HomeDir>/memory
-        String^ TasksDir;         // <HomeDir>/tasks
-        String^ SwarmsDir;        // <HomeDir>/swarms
-        String^ DeliverablesDir;  // <HomeDir>/deliverables (root)
-        String^ TmpDir;           // <HomeDir>/state/tmp
-
-        // v0.1.8: per-project subfolder. Deliverables are grouped by
-        // project name so outputs from multiple sessions don't clobber
-        // each other in the same flat directory.
-        String^ ProjectName;           // "" or a slug like "trial_of_echoes"
-        String^ ProjectDeliverablesDir; // <HomeDir>/deliverables/<ProjectName> or
-                                       // <HomeDir>/deliverables if no project
-    };
-
-    public ref class PathResolver abstract sealed {
-    public:
-        // Slugify a free-form string into a safe filesystem / URL name.
-        //   - lowercases
-        //   - keeps [a-z0-9._-]
-        //   - collapses runs of "-" to one
-        //   - trims leading/trailing "-"
-        // Returns "" for empty / fully-non-alphanumeric input.
-        static String^ Slugify(String^ name) {
-            if (String::IsNullOrEmpty(name)) { return ""; }
-            String^ s = name->ToLower()->Trim();
-            StringBuilder^ sb = gcnew StringBuilder();
-            bool prevDash = false;
-            for (int i = 0; i < s->Length; i++) {
-                wchar_t c = s[i];
-                bool ok = (c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9') || c == L'.' || c == L'_' || c == L'-';
-                if (ok) {
-                    sb->Append(c);
-                    prevDash = (c == L'-');
-                } else if (!prevDash) {
-                    sb->Append(L'-');
-                    prevDash = true;
-                }
-            }
-            String^ result = sb->ToString()->Trim(L'-');
-            return result;
-        }
-
-        // Three-arg form: skillDir + homeDir + projectName. Use this when
-        // the caller knows the project name (e.g. from -Project CLI arg
-        // or VORTEX_PROJECT env var).
-        static Paths^ Resolve(String^ skillDir, String^ homeDir, String^ projectName) {
-            Paths^ p = Resolve(skillDir, homeDir);
-            p->ProjectName = Slugify(projectName);
-            p->ProjectDeliverablesDir = String::IsNullOrEmpty(p->ProjectName)
-                ? p->DeliverablesDir
-                : Path::Combine(p->DeliverablesDir, p->ProjectName);
-            return p;
-        }
-
-        // Two-arg form: skillDir + homeDir, no project. Equivalent to
-        // Resolve(skillDir, homeDir, "").
-        static Paths^ Resolve(String^ skillDir, String^ homeDir) {
-            auto p = gcnew Paths();
-            p->SkillDir = skillDir;
-            p->HomeDir = homeDir;
-            p->RootDir = homeDir;  // legacy alias: callers that use
-                                    // p->RootDir for file-presence checks
-                                    // should now use p->SkillDir; callers
-                                    // that use it for state/audit should
-                                    // use p->HomeDir. RootDir == HomeDir
-                                    // is the closest legacy behavior.
-            p->AgentsDir        = Path::Combine(skillDir, "agents");
-            p->TemplatesDir     = Path::Combine(skillDir, "templates");
-            p->StateDir         = Path::Combine(homeDir, "state");
-            p->MemoryDir        = Path::Combine(homeDir, "memory");
-            p->TasksDir         = Path::Combine(homeDir, "tasks");
-            p->SwarmsDir        = Path::Combine(homeDir, "swarms");
-            p->DeliverablesDir  = Path::Combine(homeDir, "deliverables");
-            p->TmpDir           = Path::Combine(homeDir, "state", "tmp");
-            p->ProjectName = "";
-            p->ProjectDeliverablesDir = p->DeliverablesDir;
-            return p;
-        }
-
-        // Backward compat: one root for both. New code should call the
-        // three-arg or two-arg overload above.
-        static Paths^ Resolve(String^ path) {
-            return Resolve(path, path, "");
-        }
-
-        static void EnsureRuntimeDirs(Paths^ p) {
-            Directory::CreateDirectory(Path::Combine(p->StateDir, "pending_approvals"));
-            Directory::CreateDirectory(p->SwarmsDir);
-            Directory::CreateDirectory(p->MemoryDir);
-            Directory::CreateDirectory(p->DeliverablesDir);
-            Directory::CreateDirectory(p->TasksDir);
-            Directory::CreateDirectory(p->TmpDir);
-            if (!String::IsNullOrEmpty(p->ProjectName)) {
-                Directory::CreateDirectory(p->ProjectDeliverablesDir);
-            }
-        }
-    };
-
-    // -------------------------------------------------------------------------
-    // Console helpers — preserve the look of the bash version (✓ / ✗ / ▶ etc.)
-    // -------------------------------------------------------------------------
-    public ref class ConsoleX abstract sealed {
-    public:
-        static void Err(String^ msg) {
-            Console::Error->WriteLine("ERROR: " + msg);
-        }
-
-        static void Ok(String^ msg) {
-            Console::WriteLine("  ✓ " + msg);
-        }
-
-        static void Fail(String^ msg) {
-            Console::WriteLine("  ✗ " + msg);
-        }
-
-        static void Step(String^ msg) {
-            ConsoleColor prev = Console::ForegroundColor;
-            Console::ForegroundColor = ConsoleColor::Cyan;
-            Console::Write("▶ ");
-            Console::ForegroundColor = ConsoleColor::White;
-            Console::WriteLine(msg);
-            Console::ForegroundColor = prev;
-        }
-
-        static void Banner(String^ title) {
-            ConsoleColor prev = Console::ForegroundColor;
-            Console::ForegroundColor = ConsoleColor::Cyan;
-            Console::WriteLine("═══════════════════════════════════════════════════════");
-            Console::WriteLine("  " + title);
-            Console::WriteLine("═══════════════════════════════════════════════════════");
-            Console::ForegroundColor = prev;
-        }
-    };
-
-    // -------------------------------------------------------------------------
     // JSON helpers — thin wrappers around System.Text.Json
     // -------------------------------------------------------------------------
-    public ref class JsonX abstract sealed {
+    public ref class JsonX {
     public:
         // Read file → JsonDocument (or nullptr if missing / invalid)
         static JsonDocument^ ReadFile(String^ path) {
@@ -282,6 +111,249 @@ namespace Vortex {
 
         static bool Has(JsonElement parent, String^ name) {
             return GetProp(parent, name).ValueKind != JsonValueKind::Undefined;
+        }
+    };
+
+    // -------------------------------------------------------------------------
+    // Paths (resolved at runtime from two roots)
+    // -------------------------------------------------------------------------
+    // Starting with v0.1.7, the engine distinguishes between two roots so
+    // that user-facing outputs survive skill updates:
+    //
+    //   * SkillDir  (mutable)   - the skill folder. Holds agents/ and
+    //                              templates/. Gets replaced when the skill
+    //                              is updated. Same dir as the .psm1/.psd1.
+    //   * HomeDir   (durable)   - the user's VORTEX_HOME. Holds state/,
+    //                              memory/, swarms/, deliverables/, tasks/.
+    //                              Persists across skill updates. Shared
+    //                              across multiple skill instances on the
+    //                              same machine (default: %APPDATA%\Vortex-OS).
+    //
+    // The PowerShell wrapper passes SkillDir as the first arg to
+    // Vortex.Skill::Run(); the engine reads HomeDir from $env:VORTEX_HOME
+    // (with a default of %APPDATA%\Vortex-OS).
+    //
+    // For backward compatibility, PathResolver::Resolve(path) treats
+    // `path` as BOTH roots (i.e. legacy single-root behavior). New code
+    // should call PathResolver::Resolve(skillDir, homeDir).
+    public ref struct Paths sealed {
+        // The two roots.
+        String^ SkillDir;         // mutable (the skill folder)
+        String^ HomeDir;          // durable (VORTEX_HOME, default %APPDATA%\Vortex-OS)
+
+        // Legacy alias: many call sites still use p->RootDir. Map it to
+        // HomeDir so the durable state location wins.
+        String^ RootDir;          // == HomeDir (backward compat)
+
+        // Skill-scope paths (under SkillDir). Replaced on skill update.
+        String^ AgentsDir;        // <SkillDir>/agents
+        String^ TemplatesDir;     // <SkillDir>/templates
+
+        // Home-scope paths (under HomeDir). Survive skill updates.
+        String^ StateDir;         // <HomeDir>/state
+        String^ MemoryDir;        // <HomeDir>/memory
+        String^ TasksDir;         // <HomeDir>/tasks
+        String^ SwarmsDir;        // <HomeDir>/swarms
+        String^ DeliverablesDir;  // <HomeDir>/deliverables (root)
+        String^ TmpDir;           // <HomeDir>/state/tmp
+
+        // v0.1.8: per-project subfolder. Deliverables are grouped by
+        // project name so outputs from multiple sessions don't clobber
+        // each other in the same flat directory.
+        String^ ProjectName;           // "" or a slug like "trial_of_echoes"
+        String^ ProjectDeliverablesDir; // <HomeDir>/deliverables/<ProjectName> or
+                                       // <HomeDir>/deliverables if no project
+
+        // v0.2.2: PRD-10 path sharding. The audit log and HITL
+        // checkpoint dirs can be per-user when team mode is on. Defaults
+        // match the pre-team-mode behavior.
+        String^ AuditLogFile;         // <MemoryDir>/audit.jsonl (or audit-<user>.jsonl)
+        String^ PendingApprovalsDir;  // <StateDir>/pending_approvals (or <StateDir>/<user>/pending_approvals)
+
+        // v0.2.2: PRD-14 streaming. The in-progress dir holds .partial
+        // deliverables as a dispatch runs.
+        String^ InProgressDir;        // <StateDir>/in_progress
+    };
+
+    public ref class PathResolver abstract sealed {
+    public:
+        // Slugify a free-form string into a safe filesystem / URL name.
+        //   - lowercases
+        //   - keeps [a-z0-9._-]
+        //   - collapses runs of "-" to one
+        //   - trims leading/trailing "-"
+        // Returns "" for empty / fully-non-alphanumeric input.
+        static String^ Slugify(String^ name) {
+            if (String::IsNullOrEmpty(name)) { return ""; }
+            String^ s = name->ToLower()->Trim();
+            StringBuilder^ sb = gcnew StringBuilder();
+            bool prevDash = false;
+            for (int i = 0; i < s->Length; i++) {
+                wchar_t c = s[i];
+                bool ok = (c >= L'a' && c <= L'z') || (c >= L'0' && c <= L'9') || c == L'.' || c == L'_' || c == L'-';
+                if (ok) {
+                    sb->Append(c);
+                    prevDash = (c == L'-');
+                } else if (!prevDash) {
+                    sb->Append(L'-');
+                    prevDash = true;
+                }
+            }
+            String^ result = sb->ToString()->Trim(L'-');
+            return result;
+        }
+
+        // Three-arg form: skillDir + homeDir + projectName. Use this when
+        // the caller knows the project name (e.g. from -Project CLI arg
+        // or VORTEX_PROJECT env var).
+        static Paths^ Resolve(String^ skillDir, String^ homeDir, String^ projectName) {
+            Paths^ p = Resolve(skillDir, homeDir);
+            p->ProjectName = Slugify(projectName);
+            p->ProjectDeliverablesDir = String::IsNullOrEmpty(p->ProjectName)
+                ? p->DeliverablesDir
+                : Path::Combine(p->DeliverablesDir, p->ProjectName);
+            return p;
+        }
+
+        // Two-arg form: skillDir + homeDir, no project. Equivalent to
+        // Resolve(skillDir, homeDir, "").
+        static Paths^ Resolve(String^ skillDir, String^ homeDir) {
+            auto p = gcnew Paths();
+            p->SkillDir = skillDir;
+            p->HomeDir = homeDir;
+            p->RootDir = homeDir;  // legacy alias: callers that use
+                                    // p->RootDir for file-presence checks
+                                    // should now use p->SkillDir; callers
+                                    // that use it for state/audit should
+                                    // use p->HomeDir. RootDir == HomeDir
+                                    // is the closest legacy behavior.
+            p->AgentsDir        = Path::Combine(skillDir, "agents");
+            p->TemplatesDir     = Path::Combine(skillDir, "templates");
+            p->StateDir         = Path::Combine(homeDir, "state");
+            p->MemoryDir        = Path::Combine(homeDir, "memory");
+            p->TasksDir         = Path::Combine(homeDir, "tasks");
+            p->SwarmsDir        = Path::Combine(homeDir, "swarms");
+            p->DeliverablesDir  = Path::Combine(homeDir, "deliverables");
+            p->TmpDir           = Path::Combine(homeDir, "state", "tmp");
+            p->InProgressDir     = Path::Combine(homeDir, "state", "in_progress");
+            p->AuditLogFile      = Path::Combine(p->MemoryDir, "audit.jsonl");
+            p->PendingApprovalsDir = Path::Combine(p->StateDir, "pending_approvals");
+            p->ProjectName = "";
+            p->ProjectDeliverablesDir = p->DeliverablesDir;
+            return p;
+        }
+
+        // Backward compat: one root for both. New code should call the
+        // three-arg or two-arg overload above.
+        static Paths^ Resolve(String^ path) {
+            return Resolve(path, path, "");
+        }
+
+        // v0.2.2 PRD-10: Apply a team-mode config (loaded from
+        // $VORTEX_HOME/.vortex/config.json). When team_mode is on, the
+        // audit log, state, and tasks dirs are sharded per-user. The
+        // deliverables dir is shared (default) so the team can read each
+        // other's outputs.
+        static void ApplyTeamConfig(Paths^ p, JsonElement config) {
+            if (!JsonX::GetBool(config, "team_mode", false)) return;
+            String^ user = Environment::GetEnvironmentVariable("USERNAME");
+            if (String::IsNullOrEmpty(user)) user = "anonymous";
+            // Sanitize: keep [a-z0-9._-] only, lower-case.
+            StringBuilder^ sb = gcnew StringBuilder();
+            for (int i = 0; i < user->Length; i++) {
+                wchar_t c = user[i];
+                wchar_t lc = (c >= L'A' && c <= L'Z') ? (c + 32) : c;
+                if ((lc >= L'a' && lc <= L'z') || (lc >= L'0' && lc <= L'9') || lc == L'.' || lc == L'_' || lc == L'-') {
+                    sb->Append(lc);
+                } else {
+                    sb->Append(L'_');
+                }
+            }
+            String^ userSlug = sb->ToString();
+            if (String::IsNullOrEmpty(userSlug)) userSlug = "anonymous";
+
+            if (JsonX::GetBool(config, "user_audit_log", false)) {
+                p->AuditLogFile = Path::Combine(p->MemoryDir, "audit-" + userSlug + ".jsonl");
+            }
+            if (JsonX::GetBool(config, "user_state", false)) {
+                String^ userState = Path::Combine(p->StateDir, userSlug);
+                p->StateDir = userState;
+                p->PendingApprovalsDir = Path::Combine(userState, "pending_approvals");
+                p->TmpDir = Path::Combine(userState, "tmp");
+                p->InProgressDir = Path::Combine(userState, "in_progress");
+            }
+            if (JsonX::GetBool(config, "user_tasks", false)) {
+                p->TasksDir = Path::Combine(p->TasksDir, userSlug);
+            }
+        }
+
+        static void EnsureRuntimeDirs(Paths^ p) {
+            Directory::CreateDirectory(p->PendingApprovalsDir);
+            Directory::CreateDirectory(p->SwarmsDir);
+            Directory::CreateDirectory(p->MemoryDir);
+            Directory::CreateDirectory(p->DeliverablesDir);
+            Directory::CreateDirectory(p->TasksDir);
+            Directory::CreateDirectory(p->TmpDir);
+            Directory::CreateDirectory(p->InProgressDir);
+            if (!String::IsNullOrEmpty(p->ProjectName)) {
+                Directory::CreateDirectory(p->ProjectDeliverablesDir);
+            }
+        }
+    };
+
+    // -------------------------------------------------------------------------
+    // File locking (v0.2.2 PRD-10) — best-effort advisory locks with retries.
+    // On Windows / NTFS / SMB, opening a file with FileShare::None prevents
+    // any other process from opening it. Retry with backoff.
+    // -------------------------------------------------------------------------
+    public ref class FileLock abstract sealed {
+    public:
+        // Read-with-lock: retries up to maxAttempts times. Returns the
+        // file content as a String^ (or nullptr on failure).
+        static String^ ReadWithLock(String^ path, int retryMs, int maxAttempts);
+
+        // Write-with-lock: opens the file with FileShare::None, writes,
+        // closes. Returns true on success, false on lock failure.
+        static bool WriteWithLock(String^ path, String^ content, int retryMs, int maxAttempts);
+
+        // Append-with-lock: opens in append mode with FileShare::None.
+        // Returns true on success, false on lock failure.
+        static bool AppendWithLock(String^ path, String^ line, int retryMs, int maxAttempts);
+    };
+
+    // -------------------------------------------------------------------------
+    // Console helpers — preserve the look of the bash version (✓ / ✗ / ▶ etc.)
+    // -------------------------------------------------------------------------
+    public ref class ConsoleX abstract sealed {
+    public:
+        static void Err(String^ msg) {
+            Console::Error->WriteLine("ERROR: " + msg);
+        }
+
+        static void Ok(String^ msg) {
+            Console::WriteLine("  ✓ " + msg);
+        }
+
+        static void Fail(String^ msg) {
+            Console::WriteLine("  ✗ " + msg);
+        }
+
+        static void Step(String^ msg) {
+            ConsoleColor prev = Console::ForegroundColor;
+            Console::ForegroundColor = ConsoleColor::Cyan;
+            Console::Write("▶ ");
+            Console::ForegroundColor = ConsoleColor::White;
+            Console::WriteLine(msg);
+            Console::ForegroundColor = prev;
+        }
+
+        static void Banner(String^ title) {
+            ConsoleColor prev = Console::ForegroundColor;
+            Console::ForegroundColor = ConsoleColor::Cyan;
+            Console::WriteLine("═══════════════════════════════════════════════════════");
+            Console::WriteLine("  " + title);
+            Console::WriteLine("═══════════════════════════════════════════════════════");
+            Console::ForegroundColor = prev;
         }
     };
 

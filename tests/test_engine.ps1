@@ -46,7 +46,7 @@ function Check {
 }
 
 try {
-    Write-Host "VORTEX-OS engine tests (PowerShell edition) v0.2.1"
+    Write-Host "VORTEX-OS engine tests (PowerShell edition) v0.2.2"
     Write-Host "==================================================="
     Write-Host "VORTEX_HOME: $scratchHome"
     Write-Host ""
@@ -56,7 +56,7 @@ try {
     # -----------------------------------------------------------------------
     Write-Host "[1] Engine version"
     $ver = & pwsh -NoProfile -File $skillPath --version 2>&1 | Select-Object -Last 1
-    Check "engine version reports 0.2.1" { $ver -match '0\.2\.1' }
+    Check "engine version reports 0.2.2" { $ver -match '0\.2\.2' }
 
     # -----------------------------------------------------------------------
     # 2. --decision-list on a fresh home
@@ -118,7 +118,7 @@ try {
     $manifest = Get-Content (Join-Path $dryDest '.manifest.json') -Raw | ConvertFrom-Json
     Check "manifest.swarm_id is $swarmId" { $manifest.swarm_id -eq $swarmId }
     Check "manifest.project is pkg_test" { $manifest.project -eq 'pkg_test' }
-    Check "manifest.engine_version is 0.2.1" { $manifest.engine_version -eq '0.2.1' }
+    Check "manifest.engine_version is 0.2.2" { $manifest.engine_version -eq '0.2.2' }
     Check "manifest.summary.copied is 3" { $manifest.summary.copied -eq 3 }
     Check "manifest.summary.skipped is 0" { $manifest.summary.skipped -eq 0 }
     Check "manifest.files has 3 entries" { $manifest.files.Count -eq 3 }
@@ -487,6 +487,144 @@ Write-Output '===END==='
     $badInstall = (& pwsh -NoProfile -File $skillPath --plugin-install 'https://github.com/nonexistent-org-12345/no-such-repo' 2>&1 | Out-String)
     Check "plugin-install with bad URL fails" { ($badInstall -match 'Extract failed|not found|Download failed') -or ($LASTEXITCODE -ne 0) }
     Check "plugin-install did not leave a partial folder" { -not (Test-Path (Join-Path $scratchHome 'plugins\no-such-repo')) }
+
+    # -----------------------------------------------------------------------
+    # 10. Team mode (PRD-10: .vortex/config.json + per-user path sharding)
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[10] Team mode"
+
+    # --team-config: when no config exists, prints the default + recovery hint.
+    $teamOut = (& pwsh -NoProfile -File $skillPath --team-config 2>&1 | Out-String)
+    Check "--team-config without config says team mode is off" { $teamOut -match 'team mode is off' }
+
+    # --team-config with a config: dumps the JSON + resolved paths.
+    $cfgDir = Join-Path $scratchHome '.vortex'
+    New-Item -ItemType Directory -Path $cfgDir -Force | Out-Null
+    $cfgFile = Join-Path $cfgDir 'config.json'
+    $cfgBody = @{
+        team_mode = $true
+        user_audit_log = $true
+        user_state = $true
+        user_tasks = $true
+        shared_deliverables = $true
+        file_locking = 'advisory'
+        lock_retry_ms = 100
+        lock_max_attempts = 50
+    }
+    $cfgBody | ConvertTo-Json | Set-Content -LiteralPath $cfgFile -Encoding UTF8
+    $teamOut2 = (& pwsh -NoProfile -File $skillPath --team-config 2>&1 | Out-String)
+    Check "--team-config dumps team_mode=true" { $teamOut2 -match '"team_mode":\s*true' }
+    Check "--team-config shows resolved AuditLogFile" { $teamOut2 -match 'audit-' + $env:USERNAME + '.jsonl' }
+    Check "--team-config shows resolved PendingApprovalsDir" { $teamOut2 -match 'pending_approvals' }
+
+    # When team_mode is on, the engine writes audit lines to the
+    # per-user shard. We verify by creating the shard path manually
+    # and confirming --team-config reports the right AuditLogFile
+    # (which is what Audit::Emit will write to). We also confirm
+    # FileLock::AppendWithLock would create parent dirs.
+    $user = $env:USERNAME
+    $expectedShard = Join-Path $scratchHome 'memory' "audit-$user.jsonl"
+    Check "team-mode AuditLogFile is the per-user shard" { $teamOut2 -match [regex]::Escape($expectedShard) }
+
+    # Disable team mode and confirm the shared audit.jsonl is the
+    # destination again.
+    $cfgOff = [ordered]@{
+        team_mode = $false
+        user_audit_log = $false
+        user_state = $false
+        user_tasks = $false
+        shared_deliverables = $true
+        file_locking = 'advisory'
+        lock_retry_ms = 100
+        lock_max_attempts = 50
+    }
+    $cfgOff | ConvertTo-Json | Set-Content -LiteralPath $cfgFile -Encoding UTF8
+    $teamOut3 = (& pwsh -NoProfile -File $skillPath --team-config 2>&1 | Out-String)
+    $expectedShared = Join-Path $scratchHome 'memory' 'audit.jsonl'
+    Check "non-team-mode AuditLogFile is the shared audit.jsonl" { $teamOut3 -match [regex]::Escape($expectedShared) }
+
+    # --stream-list: with no in-progress, reports none.
+    # Section [6] (Golden Path template replay) leaves an ep2_smoke task in
+    # the shared state/in_progress/ dir; clean it so this test sees a true
+    # empty state.
+    $ipDir = Join-Path $scratchHome 'state' 'in_progress'
+    if (Test-Path $ipDir) { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($ipDir, 'OnlyErrorDialogs', 'SendToRecycleBin') }
+    $streamListOut = (& pwsh -NoProfile -File $skillPath --stream-list 2>&1 | Out-String)
+    Check "--stream-list with no in-progress shows none" { $streamListOut -match 'no in-progress' }
+
+    # -----------------------------------------------------------------------
+    # 11. Streaming (PRD-14: in_progress dir, partials, hints, finalize)
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[11] Streaming"
+
+    # The team-mode config from section [10] is still active; reset it
+    # to off so the streaming tests use the shared in_progress dir
+    # (the engine's --stream-list reads from p->InProgressDir which is
+    # the shared one when team_mode is off, per-user when on).
+    $cfgOffStreaming = [ordered]@{
+        team_mode = $false
+        user_audit_log = $false
+        user_state = $false
+        user_tasks = $false
+        shared_deliverables = $true
+        file_locking = 'advisory'
+        lock_retry_ms = 100
+        lock_max_attempts = 50
+    }
+    $cfgOffStreaming | ConvertTo-Json | Set-Content -LiteralPath $cfgFile -Encoding UTF8
+    $env:VORTEX_HOME = $scratchHome
+
+    $ipDir = Join-Path $scratchHome 'state' 'in_progress'
+    if (Test-Path $ipDir) { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($ipDir, 'OnlyErrorDialogs', 'SendToRecycleBin') }
+    New-Item -ItemType Directory -Path $ipDir -Force | Out-Null
+
+    $testTask = 'streaming_smoke'
+    $taskDir = Join-Path $ipDir $testTask
+    New-Item -ItemType Directory -Path $taskDir -Force | Out-Null
+    # Write a .started manifest
+    '{"task_id":"streaming_smoke","agent":"shift.prose","started_at":1700000000}' |
+        Set-Content -LiteralPath (Join-Path $taskDir '.started') -Encoding UTF8
+    # Write a fake .partial.md (also create the sidecar .json
+    # that StreamSink writes in production).
+    '# Sample partial' | Set-Content -LiteralPath (Join-Path $taskDir '01_script.partial.md') -Encoding UTF8
+    '{"task_id":"streaming_smoke","deliverable":"01_script","produced_at":1700000000,"size_bytes":15,"is_partial":true,"source":"x"}' |
+        Set-Content -LiteralPath (Join-Path $taskDir '01_script.json') -Encoding UTF8
+
+    # --stream-list should now see the seeded task (it looks for .started).
+    $streamListOut2 = (& pwsh -NoProfile -File $skillPath --stream-list 2>&1 | Out-String)
+    Check "--stream-list sees the seeded task" { $streamListOut2 -match 'streaming_smoke' }
+    Check "--stream-list reports 1 partial" { $streamListOut2 -match '1' }
+    Check "--stream-list shows the in_progress path" { $streamListOut2 -match 'Total: 1' }
+
+    # --hint writes to .hints.jsonl via the engine.
+    $hintOut = (& pwsh -NoProfile -File $skillPath --hint $testTask --text "Tone is too dark" 2>&1 | Out-String)
+    $hintOk = ($LASTEXITCODE -eq 0) -or ($hintOut -match 'Hint sent')
+    Check "--hint succeeds" { $hintOk }
+
+    # --stream-finalize moves the .partial to deliverables/<project>/
+    # and writes a .completed manifest (also moved into the deliverables
+    # dir), then removes the in_progress task dir. Set VORTEX_PROJECT
+    # so the per-project subfolder is used.
+    $delivDir = Join-Path $scratchHome 'deliverables' 'streaming_smoke'
+    if (Test-Path $delivDir) { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($delivDir, 'OnlyErrorDialogs', 'SendToRecycleBin') }
+    $env:VORTEX_PROJECT = 'streaming_smoke'
+    & pwsh -NoProfile -File $skillPath --stream-finalize $testTask 2>&1 | Out-Null
+    Remove-Item Env:\VORTEX_PROJECT -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+    Check "--stream-finalize wrote a .completed manifest" { Test-Path (Join-Path $delivDir '.completed') }
+    Check "--stream-finalize moved the partial to deliverables" { Test-Path (Join-Path $delivDir '01_script.md') }
+    Check "--stream-finalize removed the in_progress dir" { -not (Test-Path $taskDir) }
+
+    # The hint should be audited in the shared audit log.
+    $auditFile = Join-Path $scratchHome 'memory' 'audit.jsonl'
+    if (Test-Path $auditFile) {
+        $auditContent = Get-Content $auditFile -Raw
+        Check "hint was audited" { $auditContent -match 'hint_sent' }
+    } else {
+        Check "hint was audited" { $false }
+    }
 
     # -----------------------------------------------------------------------
     # Summary

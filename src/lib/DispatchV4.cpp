@@ -1,5 +1,5 @@
 // =============================================================================
-// VORTEX-OS — V4 Master Pipeline Dispatcher implementation
+// VORTEX-OS — V4 Master Pipeline Dispatcher implementation (v0.2.2 + StreamSink)
 // =============================================================================
 #include "DispatchV4.h"
 #include "Hitl.h"
@@ -9,6 +9,7 @@
 #include "Commands.h"
 #include "CostTracker.h"
 #include "Audit.h"
+#include "StreamSink.h"
 
 namespace Vortex {
 
@@ -23,6 +24,11 @@ namespace Vortex {
     }
 
     int DispatchV4::Run(Paths^ p, String^ taskId, String^ agentName, String^ objectiveRef) {
+        // 0. STREAM — v0.2.2 PRD-14: announce the dispatch start to the
+        // operator's streaming client. The skill shell's FileSystemWatcher
+        // will see the .started file in <in_progress>/<task_id>/.
+        StreamSink::OnDispatchStart(p, taskId, agentName);
+
         // 0. AUDIT — log the dispatch start before any branching so the
         // operator can always see "who tried what, when" even when the
         // pipeline halts at step 1 below.
@@ -138,6 +144,10 @@ namespace Vortex {
             gcnew array<String^> { agentName, taskId, runModel },
             0
         );
+        // v0.2.2 PRD-14: signal the streaming client that the dispatch
+        // is done. On success, the StreamSink moves the .partial files
+        // into deliverables/<project>/.
+        StreamSink::OnDispatchEnd(p, taskId, p->ProjectName, "ok");
         return 0;
     }
 }

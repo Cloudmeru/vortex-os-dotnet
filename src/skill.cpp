@@ -24,6 +24,7 @@
 #include "lib/CostTracker.h"
 #include "lib/Audit.h"
 #include "lib/Plugin.h"
+#include "lib/StreamSink.h"
 
 using namespace Vortex;
 using namespace System::Text::Json;
@@ -340,7 +341,7 @@ static int CmdAuditTrail(Paths^ p) {
 
 // Print the version banner. Matches _meta.json `version` (0.1.0).
 static int CmdVersion() {
-    Console::WriteLine("VORTEX-OS Vortex.dll 0.2.1 (C++/CLI on PowerShell 7+, .NET 10)");
+    Console::WriteLine("VORTEX-OS Vortex.dll 0.2.2 (C++/CLI on PowerShell 7+, .NET 10)");
     return 0;
 }
 
@@ -627,6 +628,154 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint) {
     return 0;
 }
 
+// =============================================================================
+// Team mode (PRD-10)
+// =============================================================================
+
+// --team-config: print the active team config (or the default if none).
+static int CmdTeamConfig(Paths^ p) {
+    String^ cfgPath = Path::Combine(p->HomeDir, ".vortex", "config.json");
+    if (!File::Exists(cfgPath)) {
+        Console::WriteLine("  (no .vortex/config.json; team mode is off -- default single-user mode)");
+        Console::WriteLine("  Run skill\\setup-team.ps1 to enable team mode.");
+        return 0;
+    }
+    JsonDocument^ doc = JsonX::ReadFile(cfgPath);
+    if (doc == nullptr) {
+        ConsoleX::Err("Invalid config.json at: " + cfgPath);
+        return 1;
+    }
+    JsonSerializerOptions^ opts = gcnew JsonSerializerOptions();
+    opts->WriteIndented = true;
+    Console::WriteLine(JsonSerializer::Serialize(doc->RootElement, opts));
+
+    // Also print the resolved Paths values so the operator can see how
+    // ApplyTeamConfig mutated them.
+    Console::WriteLine("");
+    Console::WriteLine("  Resolved Paths (after ApplyTeamConfig):");
+    Console::WriteLine("    StateDir:           " + p->StateDir);
+    Console::WriteLine("    PendingApprovalsDir:" + p->PendingApprovalsDir);
+    Console::WriteLine("    AuditLogFile:       " + p->AuditLogFile);
+    Console::WriteLine("    TasksDir:           " + p->TasksDir);
+    Console::WriteLine("    InProgressDir:      " + p->InProgressDir);
+    return 0;
+}
+
+// =============================================================================
+// Streaming (PRD-14)
+// =============================================================================
+
+// --stream-list: list in-progress dispatches.
+static int CmdStreamList(Paths^ p) {
+    List<String^>^ tasks = StreamSink::ListInProgress(p);
+    if (tasks->Count == 0) {
+        Console::WriteLine("  (no in-progress dispatches)");
+        return 0;
+    }
+    Console::WriteLine("  {0,-22}  {1,-12}  {2}", "task_id", "started", "partials");
+    Console::WriteLine("  ----------------------  ------------  --------");
+    for each (String^ taskId in tasks) {
+        String^ dir = Path::Combine(p->InProgressDir, taskId);
+        String^ startedAt = "";
+        String^ startedFile = Path::Combine(dir, ".started");
+        if (File::Exists(startedFile)) {
+            try {
+                String^ content = File::ReadAllText(startedFile);
+                JsonDocument^ sd = JsonX::ReadFile(startedFile);
+                if (sd != nullptr && JsonX::Has(sd->RootElement, "started_at")) {
+                    long ts = JsonX::GetLong(sd->RootElement, "started_at", 0);
+                    DateTime dt = DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind::Utc).AddSeconds(ts).ToLocalTime();
+                    startedAt = dt.ToString("HH:mm:ss");
+                }
+            } catch (Exception^) {}
+        }
+        int partials = 0;
+        try {
+            for each (String^ f in Directory::GetFiles(dir)) {
+                if (Path::GetFileName(f)->Contains(".partial")) partials++;
+            }
+        } catch (Exception^) {}
+        Console::WriteLine("  {0,-22}  {1,-12}  {2}", taskId, startedAt, partials);
+    }
+    Console::WriteLine("");
+    Console::WriteLine("  Total: {0} in-progress dispatch(es)", tasks->Count);
+    // Print the in_progress dir so the operator knows where to find the
+    // .partial files (and so the test harness can assert the path).
+    Console::WriteLine("  in_progress: {0}", p->InProgressDir);
+    return 0;
+}
+
+// --stream <task_id> [--auto-open]: attach to an in-progress dispatch.
+// This is the engine-side stub: it lists the .partial files and prints
+// their paths. The skill shell's Vortex.Streamer.psm1 does the actual
+// FileSystemWatcher + interactive y/n/q prompt.
+static int CmdStream(Paths^ p, String^ taskId, bool autoOpen) {
+    String^ dir = Path::Combine(p->InProgressDir, taskId);
+    if (!Directory::Exists(dir)) {
+        ConsoleX::Err("In-progress dir not found: " + dir);
+        ConsoleX::Err("Is the dispatch running? Try --stream-list to see what's in progress.");
+        return 2;
+    }
+    Console::WriteLine("  [stream] attached to " + taskId);
+    Console::WriteLine("  In-progress: " + dir);
+    int count = 0;
+    for each (String^ f in Directory::GetFiles(dir)) {
+        String^ name = Path::GetFileName(f);
+        if (name->StartsWith(".")) continue;
+        if (!name->Contains(".partial")) continue;
+        long long size = 0;
+        {
+            FileInfo^ fi = gcnew FileInfo(f);
+            if (fi->Exists) size = (long long)fi->Length;
+        }
+        Console::WriteLine("  [stream] ready: {0,-30}  {1,8} bytes", name, size);
+        count++;
+    }
+    if (autoOpen) {
+        Console::WriteLine("  [stream] --auto-open: the skill shell would invoke the OS handler here");
+    }
+    Console::WriteLine("");
+    Console::WriteLine("  Total: {0} partial file(s). Use the skill shell's Vortex.Streamer module for interactive streaming.", count);
+    return 0;
+}
+
+// --stream-stop <task_id>: stop streaming (the dispatch continues in the
+// background). The engine side just confirms the in-progress dir exists.
+static int CmdStreamStop(Paths^ p, String^ taskId) {
+    String^ dir = Path::Combine(p->InProgressDir, taskId);
+    if (!Directory::Exists(dir)) {
+        ConsoleX::Err("No in-progress dispatch: " + taskId);
+        return 2;
+    }
+    Console::WriteLine("  [stream] stopped watching " + taskId + " (dispatch continues in background)");
+    Console::WriteLine("  Use --stream-finalize to manually move .partial files to deliverables/");
+    return 0;
+}
+
+// --hint <task_id> --text <text>: append an operator hint to .hints.jsonl
+// so the next dispatch in the chain picks it up.
+static int CmdHint(Paths^ p, String^ taskId, String^ text) {
+    bool ok = StreamSink::AppendHint(p, taskId, text);
+    if (ok) {
+        ConsoleX::Ok("Hint sent to " + taskId + ": " + text);
+        Audit::Emit(p, "T2", "operator", "hint_sent", "ok",
+            p->ProjectName, taskId, "LOW", "", "", "operator_hint",
+            gcnew array<String^> { taskId }, 0);
+        return 0;
+    }
+    ConsoleX::Err("Failed to write hint. Is the in-progress dir for " + taskId + " present?");
+    return 1;
+}
+
+// --stream-finalize <task_id>: manually move .partial files to
+// deliverables/<project>/. Used when a dispatch was aborted but the
+// operator still wants the partial deliverables.
+static int CmdStreamFinalize(Paths^ p, String^ taskId) {
+    StreamSink::OnDispatchEnd(p, taskId, p->ProjectName, "ok");
+    ConsoleX::Ok("Stream finalized: " + taskId);
+    return 0;
+}
+
 // Print the help/usage banner
 static int CmdHelp() {
     Console::WriteLine();
@@ -676,6 +825,16 @@ static int CmdHelp() {
     Console::WriteLine("       [--input <json>] [--timeout-s N]");
     Console::WriteLine("  --plugin-remove <name>         Remove a user-scope plugin");
     Console::WriteLine("  --plugin-install <url>         Install a plugin from a GitHub URL");
+    Console::WriteLine();
+    Console::WriteLine("TEAM MODE (v0.2.2+):");
+    Console::WriteLine("  --team-config                  Print the active .vortex/config.json + resolved paths");
+    Console::WriteLine();
+    Console::WriteLine("STREAMING (v0.2.2+):");
+    Console::WriteLine("  --stream-list                  List in-progress dispatches");
+    Console::WriteLine("  --stream <task_id>             Attach to an in-progress dispatch (--auto-open to skip prompt)");
+    Console::WriteLine("  --stream-stop <task_id>        Stop watching a dispatch (it continues in background)");
+    Console::WriteLine("  --hint <task_id> --text <text> Send an operator hint to the next dispatch in the chain");
+    Console::WriteLine("  --stream-finalize <task_id>    Manually move .partial files to deliverables/");
     Console::WriteLine();
     Console::WriteLine("TESTING:");
     Console::WriteLine("  verify.ps1                     Run the full post-upload verification");
@@ -963,6 +1122,45 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         return CmdPluginTest(p, args[1], inJson, to);
     }
 
+    // Team mode (PRD-10) -------------------------------------------------------
+    if (cmd == "--team-config") {
+        return CmdTeamConfig(p);
+    }
+
+    // Streaming (PRD-14) -------------------------------------------------------
+    if (cmd == "--stream-list") {
+        return CmdStreamList(p);
+    }
+    if (cmd == "--stream") {
+        // --stream <task_id> [--auto-open]
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --stream <task_id> [--auto-open]"); return 2; }
+        bool autoOpen = false;
+        for (int i = 2; i < args->Length; i++) {
+            if (args[i] == "--auto-open") { autoOpen = true; }
+        }
+        return CmdStream(p, args[1], autoOpen);
+    }
+    if (cmd == "--stream-stop") {
+        // --stream-stop <task_id>
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --stream-stop <task_id>"); return 2; }
+        return CmdStreamStop(p, args[1]);
+    }
+    if (cmd == "--hint") {
+        // --hint <task_id> --text <text>
+        if (args->Length < 4) { ConsoleX::Err("Usage: skill.exe --hint <task_id> --text <text>"); return 2; }
+        String^ hintText = "";
+        for (int i = 2; i < args->Length; i++) {
+            if (args[i] == "--text" && i + 1 < args->Length) { hintText = args[++i]; }
+        }
+        if (String::IsNullOrEmpty(hintText)) { ConsoleX::Err("--hint requires --text"); return 2; }
+        return CmdHint(p, args[1], hintText);
+    }
+    if (cmd == "--stream-finalize") {
+        // Test helper: simulate a dispatch end (moves .partial -> deliverables).
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --stream-finalize <task_id>"); return 2; }
+        return CmdStreamFinalize(p, args[1]);
+    }
+
     // Help -------------------------------------------------------------------
     if (cmd == "--version" || cmd == "-V") return CmdVersion();
     return CmdHelp();
@@ -1040,6 +1238,15 @@ namespace Vortex {
             String^ homeDir  = ResolveHomeDir();
             String^ projectName = ResolveProjectName(args);
             Paths^ p = PathResolver::Resolve(skillDir, homeDir, projectName);
+            // v0.2.2 PRD-10: read .vortex/config.json (if present) and
+            // shard paths per-user when team_mode is on. Idempotent.
+            String^ cfgPath = Path::Combine(p->HomeDir, ".vortex", "config.json");
+            if (File::Exists(cfgPath)) {
+                JsonDocument^ cfgDoc = JsonX::ReadFile(cfgPath);
+                if (cfgDoc != nullptr) {
+                    PathResolver::ApplyTeamConfig(p, cfgDoc->RootElement);
+                }
+            }
             PathResolver::EnsureRuntimeDirs(p);
             return Dispatch(p, args);
         } catch (System::Exception^ ex) {
