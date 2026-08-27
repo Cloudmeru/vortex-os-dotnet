@@ -200,7 +200,8 @@ $sources = @(
     'lib\Template.cpp',
     'lib\Packager.cpp',
     'lib\CostTracker.cpp',
-    'lib\Audit.cpp'
+    'lib\Audit.cpp',
+    'lib\Plugin.cpp'
 ) | ForEach-Object { Join-Path $scriptDir $_ }
 
 # cl.exe refuses to accept per-source /Fo when given multiple source files

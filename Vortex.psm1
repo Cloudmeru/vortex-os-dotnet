@@ -217,6 +217,32 @@ function Get-VortexLastExitCode {
     return $script:VortexLastRc
 }
 
+function Get-VortexPlugin {
+<#
+.SYNOPSIS
+    List installed VORTEX-OS plugins, or dump a single plugin's manifest.
+.DESCRIPTION
+    The engine discovers plugins from two locations:
+      1. $VORTEX_HOME\plugins\         (user-scope, durable)
+      2. <skill>\plugins\              (skill-scope, ships with the skill)
+    On conflict (same name in both) the user-scope plugin wins.
+.PARAMETER Name
+    The name of a specific plugin. If omitted, lists all discovered plugins.
+.EXAMPLE
+    PS> Get-VortexPlugin                       # list all
+    PS> Get-VortexPlugin -Name audio-foley    # dump audio-foley's manifest
+#>
+    [CmdletBinding()]
+    param(
+        [string] $Name
+    )
+    if ($Name) {
+        Invoke-Skill -Arguments @('--plugins-info', $Name)
+    } else {
+        Invoke-Skill -Arguments @('--plugins-list')
+    }
+}
+
 # --- Module export ----------------------------------------------------------
 Export-ModuleMember -Function @(
     'Invoke-Vortex'
@@ -227,4 +253,5 @@ Export-ModuleMember -Function @(
     'Deny-VortexHitl'
     'Test-VortexPackage'
     'Get-VortexLastExitCode'
+    'Get-VortexPlugin'
 )

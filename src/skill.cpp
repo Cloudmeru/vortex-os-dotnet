@@ -22,6 +22,8 @@
 #include "lib/Template.h"
 #include "lib/Packager.h"
 #include "lib/CostTracker.h"
+#include "lib/Audit.h"
+#include "lib/Plugin.h"
 
 using namespace Vortex;
 using namespace System::Text::Json;
@@ -338,8 +340,123 @@ static int CmdAuditTrail(Paths^ p) {
 
 // Print the version banner. Matches _meta.json `version` (0.1.0).
 static int CmdVersion() {
-    Console::WriteLine("VORTEX-OS Vortex.dll 0.1.11 (C++/CLI on PowerShell 7+, .NET 10)");
+    Console::WriteLine("VORTEX-OS Vortex.dll 0.2.0 (C++/CLI on PowerShell 7+, .NET 10)");
     return 0;
+}
+
+// =============================================================================
+// Plugin commands (v0.2.0 PRD-11)
+// =============================================================================
+
+// List all discovered plugins (skill-scope + user-scope, user wins on conflict).
+// Output format: "name<TAB>version<TAB>capability<TAB>source"
+// where source is "skill" or "user".
+static int CmdPluginsList(Paths^ p) {
+    auto plugins = Plugin::Discover(p->HomeDir, p->SkillDir);
+    if (plugins->Count == 0) {
+        Console::WriteLine("  (no plugins found)");
+        Console::WriteLine("  Looked in: <skill>/plugins/  and  $VORTEX_HOME/plugins/");
+        return 0;
+    }
+    Console::WriteLine("  {0,-22}  {1,-10}  {2,-14}  {3}", "name", "version", "capability", "source");
+    Console::WriteLine("  ----------------------  ----------  --------------  ------");
+    for each (String^ row in plugins) {
+        array<String^>^ parts = row->Split('\t');
+        if (parts->Length < 4) continue;
+        String^ source = parts[3]->Contains(p->HomeDir) ? "user" : "skill";
+        Console::WriteLine("  {0,-22}  {1,-10}  {2,-14}  {3}", parts[0], parts[1], parts[2], source);
+    }
+    Console::WriteLine("");
+    Console::WriteLine("  Total: {0} plugin(s)", plugins->Count);
+    return 0;
+}
+
+// Dump a plugin's manifest as pretty-printed JSON.
+static int CmdPluginsInfo(Paths^ p, String^ name) {
+    String^ dir = Plugin::ResolvePluginDir(p->HomeDir, p->SkillDir, name);
+    if (String::IsNullOrEmpty(dir)) {
+        ConsoleX::Err("Plugin not found: " + name);
+        return 2;
+    }
+    JsonDocument^ doc = Plugin::LoadManifest(dir);
+    if (doc == nullptr) {
+        ConsoleX::Err("Invalid or missing plugin.json in: " + dir);
+        return 2;
+    }
+    JsonSerializerOptions^ opts = gcnew JsonSerializerOptions();
+    opts->WriteIndented = true;
+    Console::WriteLine(JsonSerializer::Serialize(doc->RootElement, opts));
+    return 0;
+}
+
+// Test a plugin by invoking it with the supplied input JSON.
+// --input is either a JSON object literal ({"prompt":"..."}) or a file path.
+static int CmdPluginTest(Paths^ p, String^ name, String^ inJson, int timeoutS) {
+    String^ dir = Plugin::ResolvePluginDir(p->HomeDir, p->SkillDir, name);
+    if (String::IsNullOrEmpty(dir)) {
+        ConsoleX::Err("Plugin not found: " + name);
+        return 2;
+    }
+    // Resolve the input JSON. Either a file path or inline JSON.
+    String^ resolved = inJson;
+    if (!String::IsNullOrEmpty(resolved) && File::Exists(resolved)) {
+        resolved = File::ReadAllText(resolved);
+    }
+    if (String::IsNullOrEmpty(resolved)) { resolved = "{}"; }
+
+    // Parse the JSON and invoke
+    JsonDocument^ inputs = nullptr;
+    try {
+        inputs = JsonDocument::Parse(resolved);
+    } catch (Exception^ ex) {
+        ConsoleX::Err("Invalid --input JSON: " + ex->Message);
+        return 2;
+    }
+
+    // Audit the test invocation
+    Audit::Emit(p, "T2", "plugin.invoker", "plugin_test", "received",
+        p->ProjectName, "", "LOW", "", "", name,
+        gcnew array<String^> { "plugin", name, "test" }, 0);
+
+    String^ output = Plugin::Invoke(p, name, inputs->RootElement, timeoutS);
+    if (String::IsNullOrEmpty(output)) {
+        ConsoleX::Err("Plugin '" + name + "' produced no output. Check $VORTEX_HOME\\state\\plugin_logs\\");
+        return 1;
+    }
+    // Pretty-print the output JSON if it's a JSON object, else print as-is.
+    try {
+        JsonDocument^ outDoc = JsonDocument::Parse(output);
+        JsonSerializerOptions^ opts = gcnew JsonSerializerOptions();
+        opts->WriteIndented = true;
+        Console::WriteLine(JsonSerializer::Serialize(outDoc->RootElement, opts));
+    } catch (Exception^) {
+        Console::WriteLine(output);
+    }
+    return 0;
+}
+
+// Remove a user-scope plugin (does not touch skill-scope plugins).
+static int CmdPluginRemove(Paths^ p, String^ name) {
+    if (String::IsNullOrEmpty(p->HomeDir)) {
+        ConsoleX::Err("VORTEX_HOME is not set; cannot remove user-scope plugins.");
+        return 2;
+    }
+    String^ userDir = Plugin::PluginPath(Path::Combine(p->HomeDir, "plugins"), name);
+    if (!Directory::Exists(userDir)) {
+        ConsoleX::Err("No user-scope plugin named: " + name);
+        return 2;
+    }
+    try {
+        Directory::Delete(userDir, true);
+        ConsoleX::Ok("Removed user-scope plugin: " + name);
+        Audit::Emit(p, "T2", "plugin.invoker", "plugin_remove", "ok",
+            p->ProjectName, "", "LOW", "", "", name,
+            gcnew array<String^> { "plugin", name }, 0);
+        return 0;
+    } catch (Exception^ ex) {
+        ConsoleX::Err("Remove failed: " + ex->Message);
+        return 1;
+    }
 }
 
 // Print the help/usage banner
@@ -383,6 +500,13 @@ static int CmdHelp() {
     Console::WriteLine("INSPECTION:");
     Console::WriteLine("  --inspector-check <task_id>    Run Continuity Engine check");
     Console::WriteLine("  --audit-trail                  Print the audit log");
+    Console::WriteLine();
+    Console::WriteLine("PLUGINS (v0.2.0+):");
+    Console::WriteLine("  --plugins-list                 List all discovered plugins");
+    Console::WriteLine("  --plugins-info <name>          Dump a plugin's manifest as JSON");
+    Console::WriteLine("  --plugin-test <name>           Run a plugin with --input <json>");
+    Console::WriteLine("       [--input <json>] [--timeout-s N]");
+    Console::WriteLine("  --plugin-remove <name>         Remove a user-scope plugin");
     Console::WriteLine();
     Console::WriteLine("TESTING:");
     Console::WriteLine("  verify.ps1                     Run the full post-upload verification");
@@ -628,6 +752,38 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         return CmdInspectorCheck(p, args[1]);
     }
     if (cmd == "--audit-trail")  return CmdAuditTrail(p);
+
+    // Plugins ----------------------------------------------------------------
+    if (cmd == "--plugins-list")      return CmdPluginsList(p);
+    if (cmd == "--plugins-info") {
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --plugins-info <name>"); return 2; }
+        return CmdPluginsInfo(p, args[1]);
+    }
+    if (cmd == "--plugin-test") {
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --plugin-test <name> [--input <json>] [--timeout-s N]"); return 2; }
+        String^ inJson = "";
+        int to = 0;
+        for (int i = 2; i < args->Length; i++) {
+            if (args[i] == "--input" && i + 1 < args->Length) { inJson = args[++i]; }
+            else if (args[i] == "--timeout-s" && i + 1 < args->Length) { to = Int32::Parse(args[++i]); }
+        }
+        return CmdPluginTest(p, args[1], inJson, to);
+    }
+    if (cmd == "--plugin-remove") {
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --plugin-remove <name>"); return 2; }
+        return CmdPluginRemove(p, args[1]);
+    }
+    if (cmd == "--plugin-invoke") {
+        // Engine-side test path used by tests/test_engine.ps1
+        if (args->Length < 3) { ConsoleX::Err("Usage: skill.exe --plugin-invoke <name> --input <json>"); return 2; }
+        String^ inJson = "";
+        int to = 0;
+        for (int i = 3; i < args->Length; i++) {
+            if (args[i] == "--input" && i + 1 < args->Length) { inJson = args[++i]; }
+            else if (args[i] == "--timeout-s" && i + 1 < args->Length) { to = Int32::Parse(args[++i]); }
+        }
+        return CmdPluginTest(p, args[1], inJson, to);
+    }
 
     // Help -------------------------------------------------------------------
     if (cmd == "--version" || cmd == "-V") return CmdVersion();

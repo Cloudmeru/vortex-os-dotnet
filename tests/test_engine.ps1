@@ -46,7 +46,7 @@ function Check {
 }
 
 try {
-    Write-Host "VORTEX-OS engine tests (PowerShell edition) v0.1.11"
+    Write-Host "VORTEX-OS engine tests (PowerShell edition) v0.2.0"
     Write-Host "==================================================="
     Write-Host "VORTEX_HOME: $scratchHome"
     Write-Host ""
@@ -56,7 +56,7 @@ try {
     # -----------------------------------------------------------------------
     Write-Host "[1] Engine version"
     $ver = & pwsh -NoProfile -File $skillPath --version 2>&1 | Select-Object -Last 1
-    Check "engine version reports 0.1.11" { $ver -match '0\.1\.11' }
+    Check "engine version reports 0.2.0" { $ver -match '0\.2\.0' }
 
     # -----------------------------------------------------------------------
     # 2. --decision-list on a fresh home
@@ -118,7 +118,7 @@ try {
     $manifest = Get-Content (Join-Path $dryDest '.manifest.json') -Raw | ConvertFrom-Json
     Check "manifest.swarm_id is $swarmId" { $manifest.swarm_id -eq $swarmId }
     Check "manifest.project is pkg_test" { $manifest.project -eq 'pkg_test' }
-    Check "manifest.engine_version is 0.1.11" { $manifest.engine_version -eq '0.1.11' }
+    Check "manifest.engine_version is 0.2.0" { $manifest.engine_version -eq '0.2.0' }
     Check "manifest.summary.copied is 3" { $manifest.summary.copied -eq 3 }
     Check "manifest.summary.skipped is 0" { $manifest.summary.skipped -eq 0 }
     Check "manifest.files has 3 entries" { $manifest.files.Count -eq 3 }
@@ -347,6 +347,130 @@ try {
     $direct = Get-VortexAuditTrail -Project 'cost_test_project'
     Check "Get-VortexAuditTrail is exported" { ($direct | Measure-Object).Count -ge 1 }
     Check "Get-VortexAuditTrail -Project cost_test_project returns the violation" { ($direct | Where-Object { $_.rule_violated -eq 'tone_drift' }).Count -ge 1 }
+
+    # -----------------------------------------------------------------------
+    # 9. Plugin system (PRD-11: lib/Plugin.cpp + skill/plugins/ + SDK)
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[9] Plugin system"
+
+    # --plugins-list discovers all 6 skill-scope reference plugins.
+    $listOut = (& pwsh -NoProfile -File $skillPath --plugins-list 2>&1 | Out-String)
+    Check "plugins-list shows audio-foley"        { $listOut -match 'audio-foley' }
+    Check "plugins-list shows text-writer"        { $listOut -match 'text-writer' }
+    Check "plugins-list shows text-editor"        { $listOut -match 'text-editor' }
+    Check "plugins-list shows image-portrait"     { $listOut -match 'image-portrait' }
+    Check "plugins-list shows code-typescript"    { $listOut -match 'code-typescript' }
+    Check "plugins-list shows media-ffmpeg"       { $listOut -match 'media-ffmpeg' }
+    Check "plugins-list reports 6 plugins total"  { $listOut -match 'Total: 6 plugin' }
+    Check "plugins-list marks them as skill-scope" { $listOut -match 'skill' }
+
+    # --plugins-info dumps a single plugin's manifest.
+    $infoOut = (& pwsh -NoProfile -File $skillPath --plugins-info audio-foley 2>&1 | Out-String)
+    Check "plugins-info audio-foley has name"      { $infoOut -match '"name": "audio-foley"' }
+    Check "plugins-info audio-foley has capability" { $infoOut -match '"capability": "audio"' }
+    Check "plugins-info audio-foley has timeout_s"  { $infoOut -match '"timeout_s": 300' }
+
+    # --plugin-test invokes a plugin and reads back the output JSON.
+    # We test the audio-foley plugin (stub: writes a 1s silent WAV).
+    $pluginHome = Join-Path $scratchHome 'deliverables\plugin_smoke'
+    New-Item -ItemType Directory -Path $pluginHome -Force | Out-Null
+    $env:VORTEX_PROJECT = 'plugin_smoke'
+    $inputJson = '{"prompt":"footsteps on gravel","duration_s":2}'
+    $inputFile = Join-Path $scratchHome 'plugin_input.json'
+    Set-Content -LiteralPath $inputFile -Value $inputJson -Encoding UTF8
+    $testRaw = & pwsh -NoProfile -File $skillPath --plugin-test audio-foley --input $inputFile --timeout-s 30 2>&1
+    $testOut = $testRaw | Out-String
+    Check "plugin-test audio-foley returns a file" { $testOut -match '"file":' }
+    Check "plugin-test audio-foley duration_s=2"   { $testOut -match '"duration_s": 2' }
+    Check "plugin-test audio-foley wrote a WAV"     { $testOut -match '\.wav' }
+
+    # Parse the JSON properly to get the actual file path (the C++ engine
+    # JSON-encodes special chars like '+' as '\u002B'; ConvertFrom-Json
+    # un-escapes them so we get a usable filesystem path).
+    # The wrapper may prepend an auto-update banner; locate the JSON block
+    # by finding '{' then grabbing everything up to the matching '}'.
+    $testOut = ($testRaw -join "`n")
+    $braceStart = $testOut.IndexOf('{')
+    $testJson = $null
+    if ($braceStart -ge 0) {
+        # Find the matching '}' (top-level only; JSON.parse handles nesting)
+        $depth = 0
+        $endIdx = -1
+        for ($i = $braceStart; $i -lt $testOut.Length; $i++) {
+            $ch = $testOut[$i]
+            if ($ch -eq '{') { $depth++ }
+            elseif ($ch -eq '}') {
+                $depth--
+                if ($depth -eq 0) { $endIdx = $i; break }
+            }
+        }
+        if ($endIdx -gt $braceStart) {
+            $testJson = $testOut.Substring($braceStart, $endIdx - $braceStart + 1)
+        }
+    }
+    $wavPath = $null
+    if ($testJson) {
+        try {
+            $testObj = $testJson | ConvertFrom-Json
+            $wavPath = [string]$testObj.file
+        } catch {
+            $wavPath = $null
+        }
+    }
+    Check "plugin-test output JSON has a usable file path" { ($wavPath -and -not $wavPath.Contains('\u')) }
+    if ($wavPath -and (Test-Path $wavPath)) {
+        Check "plugin-test wrote the wav file to disk" { $true }
+        Check "wav file is larger than 100 bytes"      { (Get-Item $wavPath).Length -gt 100 }
+    } else {
+        Check "plugin-test wrote the wav file to disk" { $false }
+    }
+
+    # The audit log should record the plugin invocation (single emit per
+    # --plugin-test run). The actual Invoke() in Plugin.cpp also emits a
+    # plugin_invoke line, so we expect at least 1.
+    $auditFile = Join-Path $scratchHome 'memory\audit.jsonl'
+    Check "audit log exists after plugin test" { Test-Path $auditFile }
+    $auditLines = Get-Content $auditFile
+    Check "audit log has a plugin_invoke event" { ($auditLines | Where-Object { $_ -match 'plugin_invoke' }).Count -ge 1 }
+    Check "audit log has a plugin_test event"   { ($auditLines | Where-Object { $_ -match 'plugin_test' }).Count -ge 1 }
+
+    # Get-VortexPlugin (engine-side) also works via the engine module.
+    # Use a fresh sub-shell + a temp script file so the backtick-n inside
+    # the -join works (PowerShell's outer parser would otherwise eat the
+    # backtick before pwsh sees it).
+    $gvTestFile = Join-Path $scratchHome 'gv_test.ps1'
+    $vortexModulePath = Join-Path $HOME 'Documents\PowerShell\Modules'
+    Set-Content -LiteralPath $gvTestFile -Value @"
+`$env:VORTEX_SKILL_ROOT = '$skillDir'
+`$env:VORTEX_NO_AUTO_UPDATE = '1'
+`$env:PSModulePath = '$vortexModulePath;' + `$env:PSModulePath
+Import-Module Vortex -RequiredVersion 0.2.0 -Force
+`$out = Get-VortexPlugin
+Write-Output '===START==='
+`$out -join "`n"
+Write-Output '===END==='
+"@ -Encoding UTF8
+    $gvOut = & pwsh -NoProfile -File $gvTestFile 2>&1 | Out-String
+    Check "Get-VortexPlugin cmdlet is exported" { $gvOut -match 'audio-foley' }
+
+    # --plugin-remove (user-scope only). Copy audio-foley to user-scope first.
+    $userPlugins = Join-Path $scratchHome 'plugins\user-foley'
+    New-Item -ItemType Directory -Path $userPlugins -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $skillDir 'plugins\audio-foley\plugin.json') -Destination (Join-Path $userPlugins 'plugin.json') -Force
+    Copy-Item -LiteralPath (Join-Path $skillDir 'plugins\audio-foley\invoke.ps1') -Destination (Join-Path $userPlugins 'invoke.ps1') -Force
+    $userListOut = (& pwsh -NoProfile -File $skillPath --plugins-list 2>&1 | Out-String)
+    Check "user-scope plugin override shows user source" { $userListOut -match 'user-foley\s+1\.0\.0\s+audio\s+user' }
+    # Remove it.
+    $rmOut = (& pwsh -NoProfile -File $skillPath --plugin-remove user-foley 2>&1 | Out-String)
+    Check "plugin-remove reports success" { $rmOut -match 'Removed user-scope plugin' }
+    Check "user-scope plugin no longer listed" { -not (Test-Path $userPlugins) }
+
+    # Validate the plugin SDK helpers are importable.
+    $sdkPath = Join-Path $skillDir 'plugin-sdk\Vortex.Plugin.psm1'
+    Check "plugin SDK module exists" { Test-Path $sdkPath }
+    $sdkTest = pwsh -NoProfile -Command "& { Import-Module '$sdkPath' -Force; Get-Command Get-VortexPluginInput | Out-Null; Get-Command Write-VortexPluginOutput | Out-Null; Get-Command Test-VortexPluginInput | Out-Null; Get-Command Invoke-MiniMaxLLM | Out-Null; Get-Command Write-VortexPluginLog | Out-Null; 'all exported' }" 2>&1
+    Check "plugin SDK exports all 5 functions" { $sdkTest -match 'all exported' }
 
     # -----------------------------------------------------------------------
     # Summary
