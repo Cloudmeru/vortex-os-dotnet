@@ -46,7 +46,7 @@ function Check {
 }
 
 try {
-    Write-Host "VORTEX-OS engine tests (PowerShell edition) v0.1.9"
+    Write-Host "VORTEX-OS engine tests (PowerShell edition) v0.1.11"
     Write-Host "==================================================="
     Write-Host "VORTEX_HOME: $scratchHome"
     Write-Host ""
@@ -56,7 +56,7 @@ try {
     # -----------------------------------------------------------------------
     Write-Host "[1] Engine version"
     $ver = & pwsh -NoProfile -File $skillPath --version 2>&1 | Select-Object -Last 1
-    Check "engine version reports 0.1.10" { $ver -match '0\.1\.10' }
+    Check "engine version reports 0.1.11" { $ver -match '0\.1\.11' }
 
     # -----------------------------------------------------------------------
     # 2. --decision-list on a fresh home
@@ -118,7 +118,7 @@ try {
     $manifest = Get-Content (Join-Path $dryDest '.manifest.json') -Raw | ConvertFrom-Json
     Check "manifest.swarm_id is $swarmId" { $manifest.swarm_id -eq $swarmId }
     Check "manifest.project is pkg_test" { $manifest.project -eq 'pkg_test' }
-    Check "manifest.engine_version is 0.1.10" { $manifest.engine_version -eq '0.1.10' }
+    Check "manifest.engine_version is 0.1.11" { $manifest.engine_version -eq '0.1.11' }
     Check "manifest.summary.copied is 3" { $manifest.summary.copied -eq 3 }
     Check "manifest.summary.skipped is 0" { $manifest.summary.skipped -eq 0 }
     Check "manifest.files has 3 entries" { $manifest.files.Count -eq 3 }
@@ -211,8 +211,12 @@ try {
     # 5000*0.0008/1000 + 2000*0.0024/1000 = 0.004 + 0.0048 = 0.0088
     Check "first entry cost_usd matches expected (0.008800)" { $row1.cost_usd -eq 0.0088 }
 
-    # --cost-report (text) shows the project + per-agent breakdown
-    $report = (& pwsh -NoProfile -File $skillPath --cost-report -$env:VORTEX_PROJECT = $ 2>&1 | Out-String)
+    # --cost-report (text) shows the project + per-agent breakdown.
+    # NOTE: we removed [string] $Project from skill.ps1 in v0.1.11 because it
+    # greedily bound the engine's --project arg, so the project name is
+    # communicated via $env:VORTEX_PROJECT only. The engine picks it up
+    # from there.
+    $report = (& pwsh -NoProfile -File $skillPath --cost-report 2>&1 | Out-String)
     Check "cost-report shows the project name" { $report -match $projectName }
     Check "cost-report shows writer.shift" { $report -match 'writer\.shift' }
     Check "cost-report shows audio.foley" { $report -match 'audio\.foley' }
@@ -224,7 +228,7 @@ try {
     # --cost-report --json
     # The skill shell prints a status line to stdout before forwarding to the
     # engine, so we filter for the line that starts with '{' (the JSON payload).
-    $jsonOut = & pwsh -NoProfile -File $skillPath --cost-report -$env:VORTEX_PROJECT = $ --json 2>&1
+    $jsonOut = & pwsh -NoProfile -File $skillPath --cost-report --json 2>&1
     $jsonText = ($jsonOut | Where-Object { $_ -match '^\s*\{' }) -join "`n"
     $jsonText = $jsonText.Trim()
     Check "cost-report --json returns valid JSON" { try { $jsonText | ConvertFrom-Json | Out-Null; $true } catch { $false } }
@@ -234,7 +238,8 @@ try {
     Check "cost-report --json has 1 project" { $jsonObj.projects.Count -eq 1 }
     Check "cost-report --json project has 2 agents" { $jsonObj.projects[0].agents.Count -eq 2 }
 
-    # --budget-show (the budget was already set above)
+    # --budget-show (the budget was already set above). The engine reads
+    # --project for the budget lookup; skill.ps1 forwards the arg.
     $budgetShow = (& pwsh -NoProfile -File $skillPath --budget-show --project $projectName 2>&1 | Out-String)
     Check "budget-show reports the configured usd_total" { $budgetShow -match 'usd_total.*0\.01' }
     Check "budget-show reports so_far >= usd_total (over budget)" { $budgetShow -match 'over budget|100\.|used' }
@@ -258,6 +263,90 @@ try {
     if (Test-Path $flag100) { Remove-Item $flag100 -Force }
     $budgetFile = Join-Path $scratchHome 'deliverables\' "$projectName" '\_meta.json'
     if (Test-Path $budgetFile) { Remove-Item $budgetFile -Force }
+
+    # -----------------------------------------------------------------------
+    # 8. Audit log viewer (PRD-13: lib/Vortex.AuditViewer.psm1)
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[8] Audit log viewer"
+
+    # Seed the audit.jsonl with 6 representative events covering every
+    # viewer code path: T0 dispatch, T2 self-heal violation + fix, T2
+    # token_audit (warn), T2 hitl_request (PENDING_HUMAN), T2 dispatch_end.
+    $auditDir = Join-Path $scratchHome 'memory'
+    if (-not (Test-Path $auditDir)) { New-Item -ItemType Directory -Path $auditDir -Force | Out-Null }
+    $auditFile = Join-Path $auditDir 'audit.jsonl'
+    $seedLines = @(
+        '{"ts":"2026-08-22T10:00:00.000+00:00","tier":"T0","agent":"t0.general_manager","action":"dispatch_start","status":"received","project":"cost_test_project","task_id":"ep1","severity":"LOW","rule_violated":"","rule_fixed":"","gate_id":"","tags":["t0","ep1"]}',
+        '{"ts":"2026-08-22T10:00:05.000+00:00","tier":"T2","agent":"shift.prose","action":"token_audit","status":"warn","project":"cost_test_project","task_id":"ep1","severity":"HIGH","rule_violated":"tone_drift","rule_fixed":"","gate_id":"","tags":["inspector","shift.prose","ep1"]}',
+        '{"ts":"2026-08-22T10:00:06.000+00:00","tier":"T2","agent":"prompt.optimizer","action":"self_heal","status":"ok","project":"cost_test_project","task_id":"ep1","severity":"MEDIUM","rule_violated":"tone_drift","rule_fixed":"strict_prompt_v1","gate_id":"","tags":["selfheal","shift.prose","tone_drift"]}',
+        '{"ts":"2026-08-22T10:00:30.000+00:00","tier":"T2","agent":"shift.packaging","action":"hitl_request","status":"PENDING_HUMAN","project":"cost_test_project","task_id":"package_websim","severity":"HIGH","rule_violated":"","rule_fixed":"","gate_id":"gate1_script","tags":["hitl","package_websim"]}',
+        '{"ts":"2026-08-22T10:01:00.000+00:00","tier":"T2","agent":"shift.prose","action":"dispatch_end","status":"ok","project":"cost_test_project","task_id":"ep1","severity":"LOW","rule_violated":"","rule_fixed":"","gate_id":"","tags":["shift.prose","ep1","MiniMax-Text-01"]}',
+        '{"ts":"2026-08-22T10:02:00.000+00:00","tier":"T4","agent":"worker.code","action":"deliver","status":"ok","project":"cost_test_project","task_id":"ep1_assets","severity":"LOW","rule_violated":"","rule_fixed":"","gate_id":"","tags":["worker.code","ep1_assets"]}'
+    )
+    Set-Content -LiteralPath $auditFile -Value $seedLines -Encoding UTF8
+
+    Check "audit.jsonl seeded with 6 events" { (Get-Content $auditFile).Count -eq 6 }
+
+    # The viewer module must be on disk next to skill.ps1.
+    $skillLib = Join-Path $skillDir 'lib\Vortex.AuditViewer.psm1'
+    Check "audit viewer module exists" { Test-Path $skillLib }
+
+    # --audit-trail (default table) ------------------------------------------------
+    $table = (& pwsh -NoProfile -File $skillPath --audit-trail 2>&1 | Out-String)
+    Check "audit-trail table shows the dispatch_start" { $table -match 'dispatch_start' }
+    Check "audit-trail table shows the self_heal action" { $table -match 'self_heal' }
+    Check "audit-trail table shows the VIOLATED rule" { $table -match 'tone_drift' }
+    Check "audit-trail table shows the FIXED patch"   { $table -match 'strict_prompt_v1' }
+    Check "audit-trail table shows the HITL gate"     { $table -match 'hitl_request' }
+    Check "audit-trail table shows the PENDING_HUMAN status" { $table -match 'PENDING_HUMAN' }
+
+    # --audit-trail --format tree --------------------------------------------------
+    $tree = (& pwsh -NoProfile -File $skillPath --AuditFormat tree --audit-trail 2>&1 | Out-String)
+    Check "audit-trail tree shows T0..T4 tiers" { ($tree -match 'Tier T0') -and ($tree -match 'Tier T2') -and ($tree -match 'Tier T4') }
+    Check "audit-trail tree shows the self-heal cycle" { $tree -match 'HEALED|HEAL-FAIL' }
+    Check "audit-trail tree shows the HITL gate" { $tree -match 'HITL GATE' }
+    Check "audit-trail tree shows the VIOLATED marker" { $tree -match 'VIOLATED' }
+    Check "audit-trail tree shows the FIXED marker" { $tree -match '\[END\]|FIXED' }
+
+    # --audit-trail --format selfheal ----------------------------------------------
+    $sh = (& pwsh -NoProfile -File $skillPath --AuditFormat selfheal --audit-trail 2>&1 | Out-String)
+    Check "audit-trail selfheal shows 1 violation" { $sh -match 'Violations: 1' }
+    Check "audit-trail selfheal identifies tone_drift" { $sh -match 'tone_drift' }
+    Check "audit-trail selfheal shows the matching fix" { $sh -match 'strict_prompt_v1' }
+
+    # --audit-trail --format hitl --------------------------------------------------
+    $hitl = (& pwsh -NoProfile -File $skillPath --AuditFormat hitl --audit-trail 2>&1 | Out-String)
+    Check "audit-trail hitl shows 1 HITL event" { $hitl -match 'Total HITL events: 1' }
+    Check "audit-trail hitl shows the gate_id" { $hitl -match 'gate1_script' }
+
+    # --audit-trail --format json --------------------------------------------------
+    # The skill shell may prepend a "[vortex-os] ..." banner to stdout.
+    # Filter to just the JSON block: skip the [vortex-os] status line
+    # (which is a single non-JSON line starting with '['), then take
+    # everything from the first '[' or '{' until the last ']'.
+    $jsonRaw = & pwsh -NoProfile -File $skillPath --AuditFormat json --audit-trail 2>&1
+    # Drop the [vortex-os] banner specifically (it's a single line that
+    # starts with '[vortex-os]').
+    $jsonLines = $jsonRaw | Where-Object { $_ -notmatch '^\[vortex-os\]' }
+    $json = ($jsonLines -join "`n").Trim()
+    # Find the JSON array start.
+    $startIdx = $json.IndexOf('[')
+    if ($startIdx -lt 0) { $startIdx = 0 }
+    $json = $json.Substring($startIdx)
+    # Truncate at the last ']' so any trailing junk doesn't break
+    # ConvertFrom-Json.
+    $endIdx = $json.LastIndexOf(']')
+    if ($endIdx -gt 0) { $json = $json.Substring(0, $endIdx + 1) }
+    Check "audit-trail json returns an array" { $json.StartsWith('[') }
+    $jsonObj = $json | ConvertFrom-Json
+    Check "audit-trail json has 6 events" { $jsonObj.Count -eq 6 }
+
+    # Direct cmdlet invocation (no skill.ps1 wrapper) --------------------------------
+    Import-Module $skillLib -Force
+    $direct = Get-VortexAuditTrail -Project 'cost_test_project'
+    Check "Get-VortexAuditTrail is exported" { ($direct | Measure-Object).Count -ge 1 }
+    Check "Get-VortexAuditTrail -Project cost_test_project returns the violation" { ($direct | Where-Object { $_.rule_violated -eq 'tone_drift' }).Count -ge 1 }
 
     # -----------------------------------------------------------------------
     # Summary
