@@ -114,7 +114,7 @@ namespace Vortex {
             sb->AppendLine("  \"swarm_id\": \"" + JsonX::EscapeJson(swarmId) + "\",");
             sb->AppendLine("  \"project\": \"" + JsonX::EscapeJson(projectName) + "\",");
             sb->AppendLine("  \"packaged_at\": \"" + DateTime::Now.ToString("yyyy-MM-ddTHH:mm:ss", System::Globalization::CultureInfo::InvariantCulture) + "\",");
-            sb->AppendLine("  \"engine_version\": \"0.2.0\",");
+            sb->AppendLine("  \"engine_version\": \"0.2.1\",");
             sb->AppendLine("  \"summary\": { \"copied\": " + copied + ", \"skipped\": " + skipped + ", \"failed\": " + failed + " },");
             sb->AppendLine("  \"files\": [");
             for (int i = 0; i < manifest->Count; i++) {

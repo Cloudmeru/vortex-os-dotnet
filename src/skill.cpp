@@ -340,7 +340,7 @@ static int CmdAuditTrail(Paths^ p) {
 
 // Print the version banner. Matches _meta.json `version` (0.1.0).
 static int CmdVersion() {
-    Console::WriteLine("VORTEX-OS Vortex.dll 0.2.0 (C++/CLI on PowerShell 7+, .NET 10)");
+    Console::WriteLine("VORTEX-OS Vortex.dll 0.2.1 (C++/CLI on PowerShell 7+, .NET 10)");
     return 0;
 }
 
@@ -459,6 +459,174 @@ static int CmdPluginRemove(Paths^ p, String^ name) {
     }
 }
 
+// Install a plugin from a GitHub URL. Strategy:
+//   1. Parse the URL to extract owner/repo
+//   2. GET https://api.github.com/repos/{owner}/{repo}/tarball to download
+//   3. Extract the tarball to $VORTEX_HOME/plugins/<repo>/
+//   4. Validate that plugin.json + invoke.<cmd-entry> exist
+//   5. Audit the install event
+// Pure C++/CLI via WebClient (no curl/PowerShell dependency).
+static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint) {
+    if (String::IsNullOrEmpty(url)) {
+        ConsoleX::Err("Usage: skill.exe --plugin-install <github-url> [--name <plugin-name>]");
+        return 2;
+    }
+    if (String::IsNullOrEmpty(p->HomeDir)) {
+        ConsoleX::Err("VORTEX_HOME is not set; cannot install plugins.");
+        return 2;
+    }
+    // Parse the URL: accept forms like
+    //   https://github.com/{owner}/{repo}
+    //   https://github.com/{owner}/{repo}.git
+    //   git@github.com:{owner}/{repo}.git
+    //   {owner}/{repo}
+    String^ owner = "";
+    String^ repo = "";
+    int slashIdx = -1;
+    int schemeIdx = url->IndexOf("://");
+    String^ pathPart = (schemeIdx >= 0) ? url->Substring(schemeIdx + 3) : url;
+    String^ prefix1 = "github.com/";
+    String^ prefix2 = "git";
+    String^ suffix  = ".git";
+    String^ slash   = "/";
+    if (pathPart->StartsWith(prefix1)) { pathPart = pathPart->Substring(prefix1->Length); }
+    if (pathPart->StartsWith(prefix2) && pathPart->Contains("@")) {
+        // SSH-style: git@github.com:owner/repo
+        int atIdx = pathPart->IndexOf('@');
+        if (atIdx >= 0) { pathPart = pathPart->Substring(atIdx + 1); }
+    }
+    if (pathPart->EndsWith(suffix)) { pathPart = pathPart->Substring(0, pathPart->Length - 4); }
+    if (pathPart->StartsWith(slash)) { pathPart = pathPart->Substring(1); }
+    if (pathPart->EndsWith(slash)) { pathPart = pathPart->Substring(0, pathPart->Length - 1); }
+    slashIdx = pathPart->IndexOf('/');
+    if (slashIdx > 0) {
+        owner = pathPart->Substring(0, slashIdx);
+        repo  = pathPart->Substring(slashIdx + 1);
+    } else {
+        owner = pathPart;
+    }
+    if (String::IsNullOrEmpty(owner) || String::IsNullOrEmpty(repo)) {
+        ConsoleX::Err("Could not parse GitHub URL: " + url);
+        return 2;
+    }
+    String^ pluginName = String::IsNullOrEmpty(nameHint) ? repo : nameHint;
+
+    // Download the tarball
+    String^ tarballUrl = String::Format("https://api.github.com/repos/{0}/{1}/tarball", owner, repo);
+    Console::WriteLine("  -> Downloading " + tarballUrl);
+
+    String^ tarballPath = Path::Combine(Path::GetTempPath(),
+        String::Format("vortex-plugin-{0}-{1}.tgz", pluginName,
+            DateTime::Now.ToString("yyyyMMddHHmmss")));
+
+    // Download via curl.exe (always present on Windows 10+ and Server 2019+).
+    // Avoids dragging in System.Net.WebClient / System.Net.Http which
+    // changes shape between .NET versions.
+    try {
+        Process^ proc = gcnew Process();
+        proc->StartInfo->FileName = "curl.exe";
+        proc->StartInfo->Arguments = String::Format(
+            "-L -sS -A \"VORTEX-OS/0.2.1\" -H \"Accept: application/vnd.github+json\" -o \"{0}\" \"{1}\"",
+            tarballPath, tarballUrl);
+        proc->StartInfo->UseShellExecute = false;
+        proc->StartInfo->RedirectStandardError = true;
+        proc->StartInfo->CreateNoWindow = true;
+        proc->Start();
+        String^ curlErr = proc->StandardError->ReadToEnd();
+        proc->WaitForExit(120000);
+        if (proc->ExitCode != 0) {
+            ConsoleX::Err("curl download failed: " + curlErr);
+            return 1;
+        }
+    } catch (Exception^ ex) {
+        ConsoleX::Err("curl.exe not available: " + ex->Message);
+        return 1;
+    }
+
+    if (!File::Exists(tarballPath)) {
+        ConsoleX::Err("Download returned no file");
+        return 1;
+    }
+    long long size = 0;
+    {
+        FileInfo^ fi = gcnew FileInfo(tarballPath);
+        size = (long long)fi->Length;
+    }
+    Console::WriteLine(String::Format("  -> Downloaded {0} bytes", size));
+
+    // Extract the tarball to the user-scope plugins dir
+    String^ pluginsDir = Path::Combine(p->HomeDir, "plugins");
+    Directory::CreateDirectory(pluginsDir);
+    String^ targetDir = Path::Combine(pluginsDir, pluginName);
+    if (Directory::Exists(targetDir)) {
+        // Replace existing
+        Directory::Delete(targetDir, true);
+    }
+    Directory::CreateDirectory(targetDir);
+
+    Console::WriteLine("  -> Extracting to " + targetDir);
+    // Use tar.exe (always available on Windows 10+ and Server 2019+).
+    String^ tarExe = "tar.exe";
+    String^ tarArgs = String::Format("-xzf \"{0}\" -C \"{1}\" --strip-components=1", tarballPath, targetDir);
+    try {
+        Process^ proc = gcnew Process();
+        proc->StartInfo->FileName = tarExe;
+        proc->StartInfo->Arguments = tarArgs;
+        proc->StartInfo->UseShellExecute = false;
+        proc->StartInfo->RedirectStandardError = true;
+        proc->StartInfo->CreateNoWindow = true;
+        proc->Start();
+        proc->WaitForExit(60000);
+        if (proc->ExitCode != 0) {
+            String^ err = proc->StandardError->ReadToEnd();
+            ConsoleX::Err("Extract failed: " + err);
+            // Clean up the partial folder so a failed install doesn't leave junk
+            try { Directory::Delete(targetDir, true); } catch (Exception^) {}
+            return 1;
+        }
+    } catch (Exception^ ex) {
+        ConsoleX::Err("tar.exe not available: " + ex->Message);
+        try { Directory::Delete(targetDir, true); } catch (Exception^) {}
+        return 1;
+    }
+
+    // Validate that plugin.json + invoke.<ext> exist
+    String^ manifestPath = Path::Combine(targetDir, "plugin.json");
+    if (!File::Exists(manifestPath)) {
+        ConsoleX::Err("Plugin manifest not found at: " + manifestPath);
+        ConsoleX::Err("The repo must contain a plugin.json at its root.");
+        Directory::Delete(targetDir, true);
+        return 2;
+    }
+    JsonDocument^ doc = JsonX::ReadFile(manifestPath);
+    if (doc == nullptr) {
+        ConsoleX::Err("Invalid plugin.json: " + manifestPath);
+        Directory::Delete(targetDir, true);
+        return 2;
+    }
+    String^ manifestName = JsonX::GetStrOr(doc->RootElement, "name", pluginName);
+    if (manifestName != pluginName) {
+        ConsoleX::Err("Plugin name in manifest (" + manifestName + ") does not match folder (" + pluginName + ")");
+        Directory::Delete(targetDir, true);
+        return 2;
+    }
+    String^ entry = JsonX::GetStrOr(doc->RootElement, "command.entry", "invoke.ps1");
+    String^ entryPath = Path::Combine(targetDir, entry);
+    if (!File::Exists(entryPath)) {
+        ConsoleX::Err("Plugin entry not found at: " + entryPath);
+        Directory::Delete(targetDir, true);
+        return 2;
+    }
+
+    ConsoleX::Ok("Installed plugin: " + pluginName);
+    // Best-effort cleanup of the downloaded tarball
+    try { File::Delete(tarballPath); } catch (Exception^) {}
+    Audit::Emit(p, "T2", "plugin.invoker", "plugin_install", "ok",
+        p->ProjectName, "", "LOW", "", "", pluginName,
+        gcnew array<String^> { "plugin", pluginName, url }, 0);
+    return 0;
+}
+
 // Print the help/usage banner
 static int CmdHelp() {
     Console::WriteLine();
@@ -507,6 +675,7 @@ static int CmdHelp() {
     Console::WriteLine("  --plugin-test <name>           Run a plugin with --input <json>");
     Console::WriteLine("       [--input <json>] [--timeout-s N]");
     Console::WriteLine("  --plugin-remove <name>         Remove a user-scope plugin");
+    Console::WriteLine("  --plugin-install <url>         Install a plugin from a GitHub URL");
     Console::WriteLine();
     Console::WriteLine("TESTING:");
     Console::WriteLine("  verify.ps1                     Run the full post-upload verification");
@@ -772,6 +941,15 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--plugin-remove") {
         if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --plugin-remove <name>"); return 2; }
         return CmdPluginRemove(p, args[1]);
+    }
+    if (cmd == "--plugin-install") {
+        // --plugin-install <url> [--name <plugin-name>]
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --plugin-install <github-url> [--name <name>]"); return 2; }
+        String^ nameHint = "";
+        for (int i = 2; i < args->Length; i++) {
+            if (args[i] == "--name" && i + 1 < args->Length) { nameHint = args[++i]; }
+        }
+        return CmdPluginInstall(p, args[1], nameHint);
     }
     if (cmd == "--plugin-invoke") {
         // Engine-side test path used by tests/test_engine.ps1

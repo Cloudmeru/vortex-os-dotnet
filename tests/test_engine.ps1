@@ -46,7 +46,7 @@ function Check {
 }
 
 try {
-    Write-Host "VORTEX-OS engine tests (PowerShell edition) v0.2.0"
+    Write-Host "VORTEX-OS engine tests (PowerShell edition) v0.2.1"
     Write-Host "==================================================="
     Write-Host "VORTEX_HOME: $scratchHome"
     Write-Host ""
@@ -56,7 +56,7 @@ try {
     # -----------------------------------------------------------------------
     Write-Host "[1] Engine version"
     $ver = & pwsh -NoProfile -File $skillPath --version 2>&1 | Select-Object -Last 1
-    Check "engine version reports 0.2.0" { $ver -match '0\.2\.0' }
+    Check "engine version reports 0.2.1" { $ver -match '0\.2\.1' }
 
     # -----------------------------------------------------------------------
     # 2. --decision-list on a fresh home
@@ -118,7 +118,7 @@ try {
     $manifest = Get-Content (Join-Path $dryDest '.manifest.json') -Raw | ConvertFrom-Json
     Check "manifest.swarm_id is $swarmId" { $manifest.swarm_id -eq $swarmId }
     Check "manifest.project is pkg_test" { $manifest.project -eq 'pkg_test' }
-    Check "manifest.engine_version is 0.2.0" { $manifest.engine_version -eq '0.2.0' }
+    Check "manifest.engine_version is 0.2.1" { $manifest.engine_version -eq '0.2.1' }
     Check "manifest.summary.copied is 3" { $manifest.summary.copied -eq 3 }
     Check "manifest.summary.skipped is 0" { $manifest.summary.skipped -eq 0 }
     Check "manifest.files has 3 entries" { $manifest.files.Count -eq 3 }
@@ -362,7 +362,7 @@ try {
     Check "plugins-list shows image-portrait"     { $listOut -match 'image-portrait' }
     Check "plugins-list shows code-typescript"    { $listOut -match 'code-typescript' }
     Check "plugins-list shows media-ffmpeg"       { $listOut -match 'media-ffmpeg' }
-    Check "plugins-list reports 6 plugins total"  { $listOut -match 'Total: 6 plugin' }
+    Check "plugins-list reports 17 plugins total" { $listOut -match 'Total: 17 plugin' }
     Check "plugins-list marks them as skill-scope" { $listOut -match 'skill' }
 
     # --plugins-info dumps a single plugin's manifest.
@@ -445,7 +445,7 @@ try {
 `$env:VORTEX_SKILL_ROOT = '$skillDir'
 `$env:VORTEX_NO_AUTO_UPDATE = '1'
 `$env:PSModulePath = '$vortexModulePath;' + `$env:PSModulePath
-Import-Module Vortex -RequiredVersion 0.2.0 -Force
+Import-Module Vortex -RequiredVersion 0.2.1 -Force
 `$out = Get-VortexPlugin
 Write-Output '===START==='
 `$out -join "`n"
@@ -471,6 +471,22 @@ Write-Output '===END==='
     Check "plugin SDK module exists" { Test-Path $sdkPath }
     $sdkTest = pwsh -NoProfile -Command "& { Import-Module '$sdkPath' -Force; Get-Command Get-VortexPluginInput | Out-Null; Get-Command Write-VortexPluginOutput | Out-Null; Get-Command Test-VortexPluginInput | Out-Null; Get-Command Invoke-MiniMaxLLM | Out-Null; Get-Command Write-VortexPluginLog | Out-Null; 'all exported' }" 2>&1
     Check "plugin SDK exports all 5 functions" { $sdkTest -match 'all exported' }
+
+    # 11 additional reference plugins (v0.2.1) -- all discoverable + invokable.
+    $listOut2 = (& pwsh -NoProfile -File $skillPath --plugins-list 2>&1 | Out-String)
+    foreach ($p in 'audio-music','audio-voice','image-cover','image-map',
+                   'code-python','video-hailuo','video-animator',
+                   'data-researcher','data-analyst','design-mockup','media-sqlite') {
+        Check "plugins-list shows $p" { $listOut2 -match [regex]::Escape($p) }
+    }
+    Check "plugins-list now reports 17 plugins total" { $listOut2 -match 'Total: 17 plugin' }
+
+    # --plugin-install with a bad URL: should fail gracefully (downloads,
+    # tries to extract, errors out, removes the partial folder).
+    $env:VORTEX_HOME = $scratchHome
+    $badInstall = (& pwsh -NoProfile -File $skillPath --plugin-install 'https://github.com/nonexistent-org-12345/no-such-repo' 2>&1 | Out-String)
+    Check "plugin-install with bad URL fails" { ($badInstall -match 'Extract failed|not found|Download failed') -or ($LASTEXITCODE -ne 0) }
+    Check "plugin-install did not leave a partial folder" { -not (Test-Path (Join-Path $scratchHome 'plugins\no-such-repo')) }
 
     # -----------------------------------------------------------------------
     # Summary
