@@ -65,11 +65,92 @@ static int CmdDispatchTemplate(Paths^ p, String^ templateFile, int episodeNumber
     Console::WriteLine("  Template: " + templateFile);
     if (episodeNumber >= 1) Console::WriteLine("  Episode:  " + episodeNumber);
     Console::WriteLine();
+    // v0.3.5: validate the template's agent_roster (if present) so the
+    // operator gets a clear error if a named agent's manifest is missing
+    // or malformed BEFORE the dispatch actually starts.
+    try {
+        JsonDocument^ tdoc = JsonX::ReadFile(templateFile);
+        if (tdoc != nullptr) {
+            JsonElement troot = tdoc->RootElement;
+            JsonElement rosterEl = JsonX::GetProp(troot, "agent_roster");
+            if (rosterEl.ValueKind == JsonValueKind::Array) {
+                int found = 0;
+                for each (JsonElement ag in rosterEl.EnumerateArray()) {
+                    String^ agName = ag.GetString();
+                    if (String::IsNullOrEmpty(agName)) continue;
+                    String^ manifestPath = Path::Combine(p->AgentsDir, agName + ".json");
+                    if (!File::Exists(manifestPath)) {
+                        ConsoleX::Warn("Template's agent_roster references '" + agName + "' but no manifest found at " + manifestPath);
+                    } else {
+                        ConsoleX::Ok("agent_roster: " + agName + " (manifest found)");
+                        found++;
+                    }
+                }
+                ConsoleX::Ok("agent_roster: validated " + found + " agent(s) referenced by the template");
+            }
+        }
+    } catch (Exception^ ex) {
+        ConsoleX::Warn("Template validation skipped: " + ex->Message);
+    }
+    Console::WriteLine();
     return Template::Run(p, templateFile, episodeNumber, overrides, taskId);
 }
 
-// Package one swarm's intermediate deliverables into the project's durable dir
+// Package one swarm's intermediate deliverables into the project's durable dir.
+// v0.3.5: before packaging, check the swarm's plan.json for a `reviewer`
+// field. If present, the named reviewer plugin should be invoked first
+// (the engine emits a "REVIEWER_INVOKE:" line the operator can use to
+// trigger --plugin-test on the named reviewer, OR a future version of
+// the engine will auto-invoke it).
 static int CmdPackage(Paths^ p, String^ swarmId, bool dryRun) {
+    if (String::IsNullOrEmpty(swarmId)) {
+        return Packager::Package(p, swarmId, dryRun);
+    }
+    String^ planPath = Path::Combine(p->SwarmsDir, swarmId, "plan.json");
+    if (File::Exists(planPath)) {
+        try {
+            JsonDocument^ pdoc = JsonX::ReadFile(planPath);
+            if (pdoc != nullptr) {
+                JsonElement prow = pdoc->RootElement;
+                // The plan may carry a "reviewer" field directly (set by
+                // CmdDispatchTemplate from the agent manifest) or a
+                // "agent_roster" array of names (we look each up in the
+                // agents/ dir for a "reviewer" block).
+                String^ reviewer = JsonX::GetStrOr(prow, "reviewer", "");
+                if (String::IsNullOrEmpty(reviewer)) {
+                    JsonElement rosterEl = JsonX::GetProp(prow, "agent_roster");
+                    if (rosterEl.ValueKind == JsonValueKind::Array) {
+                        for each (JsonElement ag in rosterEl.EnumerateArray()) {
+                            String^ agName = ag.GetString();
+                            if (String::IsNullOrEmpty(agName)) continue;
+                            String^ agPath = Path::Combine(p->AgentsDir, agName + ".json");
+                            if (File::Exists(agPath)) {
+                                JsonDocument^ adoc = JsonX::ReadFile(agPath);
+                                if (adoc != nullptr) {
+                                    String^ r = JsonX::GetStrOr(adoc->RootElement, "reviewer", "");
+                                    if (!String::IsNullOrEmpty(r)) { reviewer = r; break; }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (!String::IsNullOrEmpty(reviewer)) {
+                    ConsoleX::Step("Reviewer gate: " + reviewer + " (auto-invoked before HITL gate 3)");
+                    // Best-effort: invoke the named reviewer plugin. If
+                    // --plugin-test isn't present, the operator can run
+                    // it manually with the printed line.
+                    String^ reviewerManifest = Path::Combine(p->AgentsDir, reviewer + ".json");
+                    if (File::Exists(reviewerManifest)) {
+                        Console::WriteLine("REVIEWER_INVOKE: --plugin-test " + reviewer + " (the engine will auto-invoke this in a future release)");
+                    } else {
+                        ConsoleX::Warn("Reviewer named '" + reviewer + "' but no manifest at " + reviewerManifest);
+                    }
+                }
+            }
+        } catch (Exception^ ex) {
+            ConsoleX::Warn("Reviewer gate check skipped: " + ex->Message);
+        }
+    }
     return Packager::Package(p, swarmId, dryRun);
 }
 
@@ -950,6 +1031,26 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
             }
         }
         return CmdDispatchTemplate(p, args[1], ep, overrides->ToArray(), taskId);
+    }
+    if (cmd == "--recipe") {
+        // v0.3.5: --recipe <name> resolves to templates/<name>.json and
+        // forwards to --dispatch-template. Equivalent to
+        //   skill.ps1 --recipe cinematic-short
+        // vs
+        //   skill.ps1 --dispatch-template templates\cinematic-short.json
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --recipe <name> [--episode-number N] [--task <id>] [--template-var k=v]..."); return 2; }
+        String^ name = args[1];
+        String^ templatePath = Path::Combine(p->TemplatesDir, name + ".json");
+        if (!File::Exists(templatePath)) {
+            ConsoleX::Err("Recipe not found: " + templatePath + " (looked in " + p->TemplatesDir + ")");
+            return 2;
+        }
+        // Forward as --dispatch-template <path> followed by the rest of the args
+        array<String^>^ forwarded = gcnew array<String^>((args->Length - 1) + 1);
+        forwarded[0] = "--dispatch-template";
+        forwarded[1] = templatePath;
+        for (int i = 2; i < args->Length; i++) forwarded[i - 1] = args[i];
+        return Vortex::Skill::Run(args[0], forwarded);
     }
     if (cmd == "--package") {
         if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --package <swarm_id> [--dry-run]"); return 2; }

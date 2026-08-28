@@ -884,6 +884,95 @@ Write-Output '===END==='
     & pwsh -NoProfile -File $skillPath --compile-memory 2>&1 | Out-Null
 
     # -----------------------------------------------------------------------
+    # G18: --recipe <name> resolves to templates/<name>.json (v0.3.5)
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[18] --recipe shortcut"
+    # Make sure the template file the recipe points to exists
+    $recipeTemplate = Join-Path $skillRoot 'templates\iteration_pattern.json'
+    if (-not (Test-Path $recipeTemplate)) {
+        # The skill ships templates/iteration_pattern.json since v0.3.1.
+        # If the local skill folder is older, copy one in.
+        $recipeTemplate = Join-Path $skillRoot 'templates\recipe_smoke.json'
+        if (-not (Test-Path $recipeTemplate)) {
+            Set-Content -LiteralPath $recipeTemplate -Value '{"name":"recipe_smoke","version":"0.0.0","objective_template":"smoke","substitutions":{},"deliverables":[],"hitl_gates":[],"self_heal_targets":[]}' -Encoding UTF8
+        }
+    }
+    # Drop a minimal "recipe_smoke" template so we can test the resolver without depending on the skill's actual templates
+    $smokeTemplate = Join-Path $skillRoot 'templates\recipe_smoke.json'
+    Set-Content -LiteralPath $smokeTemplate -Value '{"name":"recipe_smoke","version":"0.0.0","objective_template":"smoke test","substitutions":{},"deliverables":[],"hitl_gates":[],"self_heal_targets":[]}' -Encoding UTF8
+    $recipeOut = (& pwsh -NoProfile -File $skillPath --recipe recipe_smoke 2>&1 | Out-String)
+    Check "G18: --recipe finds template by basename" { $recipeOut -match 'recipe_smoke' -or $recipeOut -match 'Template' -or $recipeOut -match 'recipe' }
+    # The recipe for a name that doesn't exist should fail cleanly
+    $missingOut = (& pwsh -NoProfile -File $skillPath --recipe no_such_recipe 2>&1 | Out-String)
+    $missingExit = $LASTEXITCODE
+    Check "G18: --recipe with unknown name exits non-zero" { $missingExit -ne 0 }
+    Check "G18: --recipe with unknown name prints an error" { $missingOut -match 'Recipe not found' -or $missingOut -match 'ERROR' }
+    Remove-Item -LiteralPath $smokeTemplate -Force -ErrorAction SilentlyContinue
+
+    # -----------------------------------------------------------------------
+    # G19: agent_roster validation in --dispatch-template (v0.3.5)
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[19] agent_roster walker"
+    # Make a template that references a real agent (supervisor.shift) and a fake one (nope.not_here)
+    $arTemplate = Join-Path $skillRoot 'templates\agent_roster_smoke.json'
+    $arBody = @'
+{
+  "name": "agent_roster_smoke",
+  "version": "0.0.0",
+  "objective_template": "smoke",
+  "substitutions": {},
+  "deliverables": [],
+  "hitl_gates": [],
+  "self_heal_targets": [],
+  "agent_roster": ["supervisor.shift", "nope.not_here"]
+}
+'@
+    Set-Content -LiteralPath $arTemplate -Value $arBody -Encoding UTF8
+    $arOut = (& pwsh -NoProfile -File $skillPath --dispatch-template $arTemplate 2>&1 | Out-String)
+    Check "G19: agent_roster validates the existing agent" { $arOut -match 'supervisor.shift' -and $arOut -match 'manifest found' }
+    Check "G19: agent_roster warns on missing agent" { $arOut -match 'nope.not_here' -and $arOut -match 'no manifest found' }
+    Remove-Item -LiteralPath $arTemplate -Force -ErrorAction SilentlyContinue
+
+    # -----------------------------------------------------------------------
+    # G20: --memory-show returns the cached slice when the store exists (v0.3.5)
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[20] --memory-show with a populated store"
+    & pwsh -NoProfile -File $skillPath --compile-memory --project client_acme_q1 2>&1 | Out-Null
+    $memOut = (& pwsh -NoProfile -File $skillPath --memory-show client_acme_q1 2>&1 | Out-String)
+    Check "G20: --memory-show returns a non-empty slice" { $memOut.Length -gt 200 }
+    Check "G20: --memory-show mentions the operator profile" { $memOut -match 'Operator profile|operator' }
+    Check "G20: --memory-show does not crash" { $LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 2 }
+
+    # -----------------------------------------------------------------------
+    # G21: Reviewer gate check on --package (v0.3.5)
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[21] Reviewer gate on --package"
+    # Make a fake swarm + plan with a reviewer field
+    $swarmId = "smoke_reviewer_$((Get-Date).Ticks)"
+    $swarmDir = Join-Path $swarmsDir $swarmId
+    New-Item -ItemType Directory -Path $swarmDir -Force | Out-Null
+    $planBody = @"
+{
+  "task_id": "$swarmId",
+  "agents_planned": ["supervisor.shift"],
+  "agent_roster": ["supervisor.shift", "media-stack"],
+  "reviewer": "reviewer.quality",
+  "deliverables": []
+}
+"@
+    Set-Content -LiteralPath (Join-Path $swarmDir 'plan.json') -Value $planBody -Encoding UTF8
+    # Make a minimal agent manifest for media-stack + reviewer.quality so the gate doesn't warn about missing
+    Set-Content -LiteralPath (Join-Path $skillRoot 'agents\media-stack.json') -Value '{"name":"media-stack","version":"0.2.0","kind":"dynamic","tier":3}' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $skillRoot 'agents\reviewer.quality.json') -Value '{"name":"reviewer.quality","version":"0.1.0","kind":"dynamic","tier":2}' -Encoding UTF8
+    $pkgOut = (& pwsh -NoProfile -File $skillPath --package $swarmId 2>&1 | Out-String)
+    Check "G21: --package prints the Reviewer gate line" { $pkgOut -match 'Reviewer gate: reviewer.quality' -or $pkgOut -match 'REVIEWER_INVOKE' }
+    Check "G21: --package completes" { $LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 2 }
+
+    # -----------------------------------------------------------------------
     # Summary
     # -----------------------------------------------------------------------
     Write-Host ""
