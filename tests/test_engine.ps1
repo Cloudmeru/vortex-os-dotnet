@@ -63,7 +63,7 @@ try {
     # -----------------------------------------------------------------------
     Write-Host "[1] Engine version"
     $ver = & pwsh -NoProfile -File $skillPath --version 2>&1 | Select-Object -Last 1
-    Check "engine version reports 0.2.3" { $ver -match '0\.2\.3' }
+    Check "engine version reports 0.3.0" { $ver -match '0\.3\.0' }
 
     # -----------------------------------------------------------------------
     # 2. --decision-list on a fresh home
@@ -125,7 +125,7 @@ try {
     $manifest = Get-Content (Join-Path $dryDest '.manifest.json') -Raw | ConvertFrom-Json
     Check "manifest.swarm_id is $swarmId" { $manifest.swarm_id -eq $swarmId }
     Check "manifest.project is pkg_test" { $manifest.project -eq 'pkg_test' }
-    Check "manifest.engine_version is 0.2.3" { $manifest.engine_version -eq '0.2.3' }
+    Check "manifest.engine_version is 0.3.0" { $manifest.engine_version -eq '0.3.0' }
     Check "manifest.summary.copied is 3" { $manifest.summary.copied -eq 3 }
     Check "manifest.summary.skipped is 0" { $manifest.summary.skipped -eq 0 }
     Check "manifest.files has 3 entries" { $manifest.files.Count -eq 3 }
@@ -641,11 +641,11 @@ Write-Output '===END==='
 
     # ---- G5: Get-VortexVersion cmdlet ----
     $verOut = & pwsh -NoProfile -Command "Import-Module $engineDir\Vortex.psd1 -ErrorAction Stop; Get-VortexVersion" 2>&1
-    Check "Get-VortexVersion returns the engine version" { ($verOut | Out-String).Trim() -match '0\.2\.[0-9]+' }
+    Check "Get-VortexVersion returns the engine version" { ($verOut | Out-String).Trim() -match '0\.3\.[0-9]+' }
 
     # ---- G5: --version still works for backwards compat ----
     $ver2 = & pwsh -NoProfile -File $skillPath --version 2>&1 | Select-Object -Last 1
-    Check "skill.ps1 --version still prints the engine version" { $ver2 -match '0\.2\.[0-9]+' }
+    Check "skill.ps1 --version still prints the engine version" { $ver2 -match '0\.3\.[0-9]+' }
 
     # ---- G11: standalone cmdlets for wrapper commands ----
     $decisions = & pwsh -NoProfile -Command "Import-Module $engineDir\Vortex.psd1 -ErrorAction Stop; Get-VortexDecision" 2>&1
@@ -742,6 +742,146 @@ Write-Output '===END==='
     }
     $cacheObj | ConvertTo-Json | Set-Content -LiteralPath $cacheFile2 -Encoding UTF8
     Check "G8: auto-update cache file path is state\auto-update-check.json" { Test-Path $cacheFile2 }
+
+    # -----------------------------------------------------------------------
+    # 13. v0.3.0 cross-project memory (PRD-17)
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[13] v0.3.0 cross-project memory (PRD-17)"
+
+    # Clean any prior memory store + reset deliverables/ so the test
+    # scope is just the 2 projects we seed below (earlier sections
+    # accumulate client_acme_q1/q2-style slugs into the same
+    # scratch home).
+    $derivedDir = Join-Path $scratchHome 'memory' 'derived'
+    if (Test-Path $derivedDir) { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($derivedDir, 'OnlyErrorDialogs', 'SendToRecycleBin') }
+    $delivRoot = Join-Path $scratchHome 'deliverables'
+    if (Test-Path $delivRoot) { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($delivRoot, 'OnlyErrorDialogs', 'SendToRecycleBin') }
+    # Also reset the audit log so only our seed lines are present.
+    $auditPath13 = Join-Path $scratchHome 'memory' 'audit.jsonl'
+    if (Test-Path $auditPath13) { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($auditPath13, 'OnlyErrorDialogs', 'SendToRecycleBin') }
+
+    # Seed: 2 projects with a few deliverables each. Project names use
+    # the client-acme_q* pattern so the series detection (Q1 in PRD-17)
+    # groups them as one series.
+    $proj1 = 'client_acme_q1'
+    $proj2 = 'client_acme_q2'
+    foreach ($p in @($proj1, $proj2)) {
+        $pDir = Join-Path $scratchHome 'deliverables' $p 'deliverables'
+        New-Item -ItemType Directory -Path $pDir -Force | Out-Null
+        'export const VERSION = "0.1.0";' | Set-Content -LiteralPath (Join-Path $pDir 'index.ts')
+        '{"name":"acme","version":"0.1.0"}' | Set-Content -LiteralPath (Join-Path $pDir 'package.json')
+        '# README' | Set-Content -LiteralPath (Join-Path $pDir 'README.md')
+    }
+    # Seed: an audit.jsonl with a couple of plugin invocations so
+    # plugin_usage + plugin_cost are non-empty.
+    $auditDir = Join-Path $scratchHome 'memory'
+    if (-not (Test-Path $auditDir)) { New-Item -ItemType Directory -Path $auditDir -Force | Out-Null }
+    $seedAudit = @(
+        '{"ts":"2026-08-28T10:00:00.000+00:00","tier":"T3","agent":"code-typescript","action":"deliver","status":"ok","project":"client_acme_q1","task_id":"t1","severity":"LOW","rule_violated":"","rule_fixed":"","gate_id":"index.ts","tags":["code"]}',
+        '{"ts":"2026-08-28T10:01:00.000+00:00","tier":"T3","agent":"text-editor","action":"deliver","status":"ok","project":"client_acme_q1","task_id":"t2","severity":"LOW","rule_violated":"","rule_fixed":"","gate_id":"README.md","tags":["text"]}',
+        '{"ts":"2026-08-28T10:02:00.000+00:00","tier":"T2","agent":"shift.prose","action":"self_heal","status":"ok","project":"client_acme_q1","task_id":"t1","severity":"MEDIUM","rule_violated":"tone_drift","rule_fixed":"tightened tone","gate_id":"","tags":["selfheal"]}',
+        '{"ts":"2026-08-28T11:00:00.000+00:00","tier":"T3","agent":"code-typescript","action":"deliver","status":"ok","project":"client_acme_q2","task_id":"t3","severity":"LOW","rule_violated":"","rule_fixed":"","gate_id":"index.ts","tags":["code"]}'
+    )
+    Set-Content -LiteralPath (Join-Path $auditDir 'audit.jsonl') -Value $seedAudit -Encoding UTF8
+
+    # --compile-memory
+    $env:VORTEX_HOME = $scratchHome
+    $memOut = (& pwsh -NoProfile -File $skillPath --compile-memory 2>&1 | Out-String)
+    Check "G17: --compile-memory returns 0" { $LASTEXITCODE -eq 0 }
+    Check "G17: --compile-memory creates memory/derived/" { Test-Path $derivedDir }
+    Check "G17: --compile-memory writes project/<slug>.json" { Test-Path (Join-Path $derivedDir 'project' 'client_acme_q1.json') }
+    Check "G17: --compile-memory writes index.json" { Test-Path (Join-Path $derivedDir 'index.json') }
+    Check "G17: --compile-memory writes operator.json" { Test-Path (Join-Path $derivedDir 'operator.json') }
+    Check "G17: --compile-memory writes series/<series>.json (auto-detected)" { Test-Path (Join-Path $derivedDir 'series' 'client_acme.json') }
+
+    # Index sanity: lists 2 projects.
+    if (Test-Path (Join-Path $derivedDir 'index.json')) {
+        $idx = Get-Content (Join-Path $derivedDir 'index.json') -Raw | ConvertFrom-Json
+        # @(...) prevents PowerShell from unrolling the array (which would
+        # make .Count return the string length of the first element).
+        Check "G17: index lists 2 projects" { @($idx.projects).Count -eq 2 }
+        Check "G17: index lists 1 series" { @($idx.series).Count -eq 1 }
+    } else {
+        Check "G17: index lists 2 projects" { $false }
+        Check "G17: index lists 1 series" { $false }
+    }
+
+    # Project fingerprint sanity.
+    if (Test-Path (Join-Path $derivedDir 'project' 'client_acme_q1.json')) {
+        $proj = Get-Content (Join-Path $derivedDir 'project' 'client_acme_q1.json') -Raw | ConvertFrom-Json
+        Check "G17: project fingerprint has project_type_hint" { $proj.project_type_hint -eq 'code-typescript' }
+        Check "G17: project fingerprint has deliverable_type_histogram" { $proj.deliverable_type_histogram.PSObject.Properties.Count -ge 1 }
+        Check "G17: project fingerprint has plugin_usage with code-typescript" { $proj.plugin_usage.'code-typescript' -ge 1 }
+        Check "G17: project fingerprint has common_components" { $proj.common_components.Count -ge 1 }
+        Check "G17: project fingerprint has episodes_in_series = client_acme" { $proj.episodes_in_series -eq 'client_acme' }
+        Check "G17: project fingerprint has common_failure_modes" { $proj.common_failure_modes -contains 'tone_drift' }
+    } else {
+        Check "G17: project fingerprint has project_type_hint" { $false }
+        Check "G17: project fingerprint has deliverable_type_histogram" { $false }
+        Check "G17: project fingerprint has plugin_usage with code-typescript" { $false }
+        Check "G17: project fingerprint has common_components" { $false }
+        Check "G17: project fingerprint has episodes_in_series = client_acme" { $false }
+        Check "G17: project fingerprint has common_failure_modes" { $false }
+    }
+
+    # Operator profile sanity.
+    if (Test-Path (Join-Path $derivedDir 'operator.json')) {
+        $op = Get-Content (Join-Path $derivedDir 'operator.json') -Raw | ConvertFrom-Json
+        Check "G17: operator profile has per_plugin_stats" { $op.per_plugin_stats.PSObject.Properties.Count -ge 1 }
+        Check "G17: operator profile projects_analyzed = 2" { $op.projects_analyzed -eq 2 }
+    } else {
+        Check "G17: operator profile has per_plugin_stats" { $false }
+        Check "G17: operator profile projects_analyzed = 2" { $false }
+    }
+
+    # Series sanity.
+    if (Test-Path (Join-Path $derivedDir 'series' 'client_acme.json')) {
+        $ser = Get-Content (Join-Path $derivedDir 'series' 'client_acme.json') -Raw | ConvertFrom-Json
+        Check "G17: series episodes list contains client_acme_q1" { @($ser.episodes) -contains 'client_acme_q1' }
+        Check "G17: series episodes list contains client_acme_q2" { @($ser.episodes) -contains 'client_acme_q2' }
+        Check "G17: series has 2 episodes" { @($ser.episodes).Count -eq 2 }
+    } else {
+        Check "G17: series episodes list contains client_acme_q1" { $false }
+        Check "G17: series episodes list contains client_acme_q2" { $false }
+        Check "G17: series has 2 episodes" { $false }
+    }
+
+    # Idempotency: running --compile-memory twice produces semantically
+    # identical output (compiled_at timestamp differs, so we can't
+    # byte-compare -- we compare the JSON content with compiled_at removed).
+    $content1 = (Get-Content (Join-Path $derivedDir 'project' 'client_acme_q1.json') -Raw | ConvertFrom-Json) | ConvertTo-Json -Depth 10
+    & pwsh -NoProfile -File $skillPath --compile-memory 2>&1 | Out-Null
+    $content2 = (Get-Content (Join-Path $derivedDir 'project' 'client_acme_q1.json') -Raw | ConvertFrom-Json) | ConvertTo-Json -Depth 10
+    # Strip compiled_at which legitimately changes between runs.
+    $content1 = ($content1 -replace '"compiled_at":\s*\d+,', '')
+    $content2 = ($content2 -replace '"compiled_at":\s*\d+,', '')
+    Check "G17: --compile-memory is idempotent (semantic JSON equality, ignoring compiled_at)" { $content1 -eq $content2 }
+
+    # --memory-show returns the prior projects context slice.
+    $memShowOut = (& pwsh -NoProfile -File $skillPath --memory-show 'client_acme_q3' 2>&1 | Out-String)
+    Check "G17: --memory-show returns a slice for client_acme_q3 (looks in series)" { $memShowOut -match 'client_acme_q2' -or $memShowOut -match 'client_acme_q1' }
+    Check "G17: --memory-show includes 'Prior projects context' header" { $memShowOut -match 'Prior projects context' }
+
+    # Get-VortexMemory cmdlet.
+    $memCmdlet = & pwsh -NoProfile -Command "Import-Module $engineDir\Vortex.psd1 -ErrorAction Stop; Get-VortexMemory" 2>&1
+    Check "G17: Get-VortexMemory is exported" { ($memCmdlet | Out-String).Length -gt 0 }
+    $memCmdletProj = & pwsh -NoProfile -Command "Import-Module $engineDir\Vortex.psd1 -ErrorAction Stop; Get-VortexMemory -Project client_acme_q1" 2>&1
+    Check "G17: Get-VortexMemory -Project prints type_hint" { ($memCmdletProj | Out-String) -match 'code-typescript' }
+    $memCmdletOp = & pwsh -NoProfile -Command "Import-Module $engineDir\Vortex.psd1 -ErrorAction Stop; Get-VortexMemory -Operator" 2>&1
+    Check "G17: Get-VortexMemory -Operator prints projects_analyzed" { ($memCmdletOp | Out-String) -match 'projects' }
+
+    # --compile-memory --project <slug> only updates one file.
+    $beforeIdx = (Get-Content (Join-Path $derivedDir 'index.json') -Raw).Length
+    & pwsh -NoProfile -File $skillPath --compile-memory --project client_acme_q1 2>&1 | Out-Null
+    Check "G17: --compile-memory --project <slug> exits 0" { $LASTEXITCODE -eq 0 }
+
+    # Deleting the memory store doesn't break the engine (R-8).
+    [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($derivedDir, 'OnlyErrorDialogs', 'SendToRecycleBin')
+    $noMemOut = (& pwsh -NoProfile -File $skillPath --memory-show 'client_acme_q1' 2>&1 | Out-String)
+    Check "G17: --memory-show is safe when memory store is absent" { $noMemOut -match 'no memory' -or $noMemOut -match 'no memory slice' }
+    # Re-create the store so the rest of the suite has a memory.
+    & pwsh -NoProfile -File $skillPath --compile-memory 2>&1 | Out-Null
 
     # -----------------------------------------------------------------------
     # Summary

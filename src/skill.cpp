@@ -25,6 +25,7 @@
 #include "lib/Audit.h"
 #include "lib/Plugin.h"
 #include "lib/StreamSink.h"
+#include "lib/Memory.h"
 
 using namespace Vortex;
 using namespace System::Text::Json;
@@ -341,7 +342,7 @@ static int CmdAuditTrail(Paths^ p) {
 
 // Print the version banner. Matches _meta.json `version` (0.1.0).
 static int CmdVersion() {
-    Console::WriteLine("VORTEX-OS Vortex.dll 0.2.3 (C++/CLI on PowerShell 7+, .NET 10)");
+    Console::WriteLine("VORTEX-OS Vortex.dll 0.3.0 (C++/CLI on PowerShell 7+, .NET 10)");
     return 0;
 }
 
@@ -836,6 +837,13 @@ static int CmdHelp() {
     Console::WriteLine("  --hint <task_id> --text <text> Send an operator hint to the next dispatch in the chain");
     Console::WriteLine("  --stream-finalize <task_id>    Manually move .partial files to deliverables/");
     Console::WriteLine();
+    Console::WriteLine("MEMORY (v0.3.0+, PRD-17):");
+    Console::WriteLine("  --compile-memory [--project S | --series N | --operator]");
+    Console::WriteLine("                                Recompute the cross-project memory store at");
+    Console::WriteLine("                                $VORTEX_HOME/memory/derived/ from the audit + cost logs.");
+    Console::WriteLine("  --memory-show [project_slug]   Print the Prior projects context slice that");
+    Console::WriteLine("                                --with-memory would inject into the next dispatch.");
+    Console::WriteLine();
     Console::WriteLine("TESTING:");
     Console::WriteLine("  verify.ps1                     Run the full post-upload verification");
     Console::WriteLine();
@@ -1067,6 +1075,48 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         // the operator (and the test suite) can manually trigger the
         // vector store hydrate. Returns 0 on success.
         return Commands::VectorHydrate(p);
+    }
+    if (cmd == "--compile-memory") {
+        // v0.3.0 (PRD-17): cross-project memory compilation. Recomputes
+        // memory/derived/{project,series,operator,index}.json from the
+        // audit log + cost log + per-project deliverables.
+        String^ targetProject = nullptr;
+        String^ targetSeries = nullptr;
+        bool operatorOnly = false;
+        bool dryRun = false;
+        for (int i = 1; i < args->Length; i++) {
+            String^ a = args[i];
+            if (a == "--project" && i + 1 < args->Length) { targetProject = args[++i]; }
+            else if (a == "--series" && i + 1 < args->Length) { targetSeries = args[++i]; }
+            else if (a == "--operator") { operatorOnly = true; }
+            else if (a == "--dry-run") { dryRun = true; }
+        }
+        if (targetProject != nullptr) {
+            return Vortex::Memory::CompileProject(p, targetProject);
+        }
+        if (targetSeries != nullptr) {
+            return Vortex::Memory::CompileSeries(p);  // series re-detected from all projects
+        }
+        if (operatorOnly) {
+            return Vortex::Memory::CompileOperator(p);
+        }
+        return Vortex::Memory::CompileAll(p);
+    }
+    if (cmd == "--memory-show") {
+        // v0.3.0 (PRD-17): read the memory slice for a project. Returns
+        // the empty string if no memory store exists.
+        String^ project = (args->Length >= 2) ? args[1] : p->ProjectName;
+        if (String::IsNullOrEmpty(project)) {
+            ConsoleX::Err("Usage: --memory-show <project_slug>");
+            return 2;
+        }
+        String^ slice = Vortex::Memory::ReadForInjection(p, project);
+        if (String::IsNullOrEmpty(slice)) {
+            Console::WriteLine("(no memory slice for " + project + "; run --compile-memory first)");
+            return 0;
+        }
+        Console::WriteLine(slice);
+        return 0;
     }
 
     // HITL -------------------------------------------------------------------

@@ -4,8 +4,8 @@
 // =============================================================================
 #include "Hitl.h"
 #include "DispatchV4.h"
-#include "Decisions.h"
 #include "Audit.h"
+#include "Decisions.h"
 
 namespace Vortex {
 
@@ -74,6 +74,8 @@ namespace Vortex {
         Console::WriteLine("Please reply directly with **'Approve " + taskId + "'** to authorize execution, or **'Deny'** to abort the sequence.");
 
         // Exit with 203 to signal the conversation layer to surface the halt.
+        // (The richer hitl_request Audit::Emit is above; the engine only
+        // emits once per gate so we don't double-count here.)
         Environment::Exit(ExitCodes::HitlPending);
     }
 

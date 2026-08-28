@@ -1,7 +1,7 @@
 @{
     # Script module + binary module = the .psm1 loads the C++/CLI .dll
     RootModule        = 'Vortex.psm1'
-    ModuleVersion     = '0.2.3'
+    ModuleVersion     = '0.3.0'
     GUID              = '7c3a9f1e-1184-4e6b-83b7-5b4a4f4e3b2a'
     Author            = 'MiniMax Agent'
     CompanyName       = 'VORTEX-OS'
@@ -29,6 +29,7 @@
         'Send-VortexStreamHint'
         'Get-VortexTeamConfig'
         'Invoke-VortexVectorHydrate'
+        'Get-VortexMemory'
         'Test-VortexPackage'
         'Get-VortexLastExitCode'
         'Get-VortexVersion'
@@ -42,7 +43,7 @@
             Tags       = @('VORTEX-OS', 'Vortex', 'autonomous', 'orchestration', 'agent', 'HITL', 'continuity', 'MiniMax', 'multimodal', 'swarm', 'clixml', 'audit', 'self-heal', 'plugin', 'extensible', 'install', 'team-mode', 'streaming')
             LicenseUri = 'https://github.com/Cloudmeru/vortex-os-dotnet/blob/main/LICENSE'
             ProjectUri = 'https://github.com/Cloudmeru/vortex-os-dotnet'
-            ReleaseNotes = 'https://github.com/Cloudmeru/vortex-os-dotnet/releases/tag/v0.2.3'
+            ReleaseNotes = 'https://github.com/Cloudmeru/vortex-os-dotnet/releases/tag/v0.3.0'
         }
     }
 }

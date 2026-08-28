@@ -251,7 +251,7 @@ function Get-VortexVersion {
     on disk.
 .EXAMPLE
     PS> Get-VortexVersion
-    0.2.2
+    0.3.0
 #>
     [CmdletBinding()]
     param()
@@ -261,6 +261,106 @@ function Get-VortexVersion {
     }
     $meta = Import-PowerShellDataFile -LiteralPath $psd1
     return $meta.ModuleVersion
+}
+
+function Get-VortexMemory {
+<#
+.SYNOPSIS
+    Browse the cross-project memory store at $VORTEX_HOME\memory\derived\.
+.DESCRIPTION
+    v0.3.0 (PRD-17): the memory store has 3 derived artifact types --
+    project fingerprints, an operator profile, and series progression
+    templates. Run `skill.ps1 --compile-memory` first to populate it,
+    then use this cmdlet to inspect what the engine learned.
+.PARAMETER Project
+    Return the fingerprint for one project. Returns the contents of
+    memory\derived\project\<slug>.json if it exists.
+.PARAMETER Series
+    Return the progression template for one series (e.g. "client-acme").
+.PARAMETER Operator
+    Return the global operator profile (memory\derived\operator.json).
+.PARAMETER As
+    summary (default) -- print a one-paragraph digest.
+    detail         -- print the full JSON.
+    json           -- return the raw JSON string for ConvertFrom-Json.
+.PARAMETER Recompile
+    Run `skill.ps1 --compile-memory` first so the memory is fresh.
+.EXAMPLE
+    PS> Get-VortexMemory
+    PS> Get-VortexMemory -Project client_acme
+    PS> Get-VortexMemory -Series client-acme
+    PS> Get-VortexMemory -Operator -As detail
+#>
+    [CmdletBinding()]
+    param(
+        [string] $Project,
+        [string] $Series,
+        [switch] $Operator,
+        [ValidateSet('summary', 'detail', 'json')]
+        [string] $As = 'summary',
+        [switch] $Recompile
+    )
+    if ($Recompile) { Invoke-Skill -Arguments @('--compile-memory') | Out-Null }
+    $root = if ($env:VORTEX_HOME) { $env:VORTEX_HOME } else { (Join-Path $env:APPDATA 'Vortex-OS') }
+    $derived = Join-Path $root 'memory\derived'
+    if (-not (Test-Path $derived)) {
+        Write-Host "(no memory store at $derived; run skill.ps1 --compile-memory first)"
+        return
+    }
+    $file = $null
+    if ($Project) { $file = Join-Path $derived "project\$Project.json" }
+    elseif ($Series) { $file = Join-Path $derived "series\$Series.json" }
+    elseif ($Operator) { $file = Join-Path $derived 'operator.json' }
+    else {
+        # No filter -- print the index.
+        $file = Join-Path $derived 'index.json'
+    }
+    if (-not (Test-Path $file)) {
+        Write-Host "(no memory file at $file; run skill.ps1 --compile-memory to populate)"
+        return
+    }
+    $content = Get-Content -LiteralPath $file -Raw
+    if ($As -eq 'json') { return $content }
+    if ($As -eq 'detail') {
+        Write-Host $content
+        return
+    }
+    # summary: print the first few key fields.
+    try {
+        $obj = $content | ConvertFrom-Json
+    } catch {
+        Write-Host "(invalid JSON in $file)"
+        return $content
+    }
+    $schema = $obj.schema
+    Write-Host "schema:        $schema"
+    if ($obj.PSObject.Properties['project'])            { Write-Host "project:       $($obj.project)" }
+    if ($obj.PSObject.Properties['series'])              { Write-Host "series:        $($obj.series)" }
+    if ($obj.PSObject.Properties['projects_analyzed'])   { Write-Host "projects:      $($obj.projects_analyzed)" }
+    if ($obj.PSObject.Properties['compiled_at'])         { $ts = [datetime]'1970-01-01Z'; $ts = $ts.AddSeconds([int]$obj.compiled_at); Write-Host ("compiled_at:   {0:o}" -f $ts.ToUniversalTime()) }
+    if ($obj.PSObject.Properties['project_type_hint'])   { Write-Host "type_hint:     $($obj.project_type_hint)" }
+    if ($obj.PSObject.Properties['stats']) {
+        $s = $obj.stats
+        if ($s.PSObject.Properties['deliverables_total']) { Write-Host "deliverables:  $($s.deliverables_total)" }
+        if ($s.PSObject.Properties['cost_usd_total'])     { Write-Host ("cost_usd:      {0:0.0000}" -f [double]$s.cost_usd_total) }
+        if ($s.PSObject.Properties['tokens_total'])       { Write-Host "tokens:        $($s.tokens_total)" }
+        if ($s.PSObject.Properties['self_heal_cycles'])   { Write-Host "self_heals:    $($s.self_heal_cycles)" }
+        if ($s.PSObject.Properties['hitl_gates'])         { Write-Host "hitl_gates:    $($s.hitl_gates)" }
+    }
+    if ($obj.PSObject.Properties['plugin_usage'] -and $obj.plugin_usage.PSObject.Properties.Count -gt 0) {
+        Write-Host "plugin_usage:"
+        $obj.plugin_usage.PSObject.Properties | Sort-Object Value -Descending | ForEach-Object {
+            Write-Host ("  {0,-20} {1}" -f $_.Name, $_.Value)
+        }
+    }
+    if ($obj.PSObject.Properties['common_components'] -and $obj.common_components.Count -gt 0) {
+        Write-Host "common_components:"
+        $obj.common_components | Select-Object -First 5 | ForEach-Object { Write-Host "  $_" }
+    }
+    if ($obj.PSObject.Properties['episodes'] -and $obj.episodes.Count -gt 0) {
+        Write-Host "episodes:"
+        $obj.episodes | ForEach-Object { Write-Host "  $_" }
+    }
 }
 
 function Get-VortexPlugin {
@@ -589,6 +689,7 @@ Export-ModuleMember -Function @(
     'Send-VortexStreamHint'
     'Get-VortexTeamConfig'
     'Invoke-VortexVectorHydrate'
+    'Get-VortexMemory'
     'Test-VortexPackage'
     'Get-VortexLastExitCode'
     'Get-VortexVersion'

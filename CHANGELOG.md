@@ -4,6 +4,66 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — 2026-08-28
+
+### Added — PRD-17 Cross-project memory & knowledge
+- **`lib/Memory.{h,cpp}`** — the cross-project memory compiler. Reads
+  the audit log + cost log + per-project manifest + deliverables/ and
+  writes derived artifacts to `$VORTEX_HOME/memory/derived/`:
+  * `project/<slug>.json` — per-project fingerprint with
+    `project_type_hint`, `deliverable_type_histogram`,
+    `plugin_usage`, `plugin_cost_breakdown_usd`, `common_components`,
+    `common_failure_modes`, `notable_self_heals`, `episodes_in_series`.
+  * `series/<series>.json` — progression across iterations of a
+    series (auto-detected from project names with `_qN`, `_epN`, `_vN`
+    suffixes per Q1 in the PRD).
+  * `operator.json` — per-plugin operator profile (cost, tokens,
+    failure modes, preferred self-heal patches).
+  * `index.json` — quick lookup of everything.
+- **`Memory::ReadForInjection(Paths^, String^ projectName)`** — returns
+  the prior-projects context slice to inject into the next dispatch
+  (capped at 4000 tokens, priority order: operator profile → most-recent
+  project in the same series → series file). Engine for the future
+  `--with-memory` dispatch flag (R-2, R-8).
+- **`--compile-memory` CLI command** — recomputes the memory store.
+  Flags: `--project <slug>`, `--series <name>`, `--operator`, `--all`
+  (default), `--dry-run`, `--force`.
+- **`--memory-show [project_slug]` CLI command** — prints the prior
+  projects context slice that `--with-memory` would inject into the
+  next dispatch. Returns "(no memory slice for X; run --compile-memory
+  first)" if the store doesn't exist (R-8).
+
+### Changed
+- **`Packager` writes `engine_version: 0.3.0`** in `.manifest.json` (was
+  0.2.3).
+- **`Vortex.psd1 ModuleVersion` bumped to 0.3.0**.
+- **`ConsoleX::Warn(String^)`** added for non-fatal operator warnings
+  (e.g. "Memory: project 'X' has no deliverables/ dir, skipping" —
+  Q4 in the PRD).
+- **`--help` text** now lists the new MEMORY section with the
+  `--compile-memory` + `--memory-show` flags.
+
+### Out of scope (deferred to v0.3.1+)
+- **`--with-memory` dispatch flag.** The infrastructure (the slice
+  in `Memory::ReadForInjection`) is in place, but wiring it into
+  DispatchV4's prompt builder is a separate change that needs the
+  v0.2.3+ `--with-memory` design sign-off first. For v0.3.0, the
+  slice is inspectable via `--memory-show` and `Get-VortexMemory`.
+
+### Pitfalls learned
+- **`Memory` collides with `System::Memory` in C++/CLI.** Use
+  `Vortex::Memory::` fully qualified at every call site. Without
+  this, the compiler emits C2872 "ambiguous symbol" / C2955 "use of
+  class generic requires generic argument list".
+- **StringBuilder chains return interior pointer, not tracked handle.**
+  `sb->Append(x).Append(y)` compiles to a `StringBuilder*` interior
+  ptr that the C++/CLI compiler can't follow. Split into separate
+  statements: `sb->Append(x); sb->Append(y);`. The same restriction
+  applies to `Comparison<T>^` and `Func<T1, T2>^` lambdas; use static
+  member functions + `gcnew Comparison<T>(&StaticCompare)` instead.
+- **Append(int) and Append(long) are ambiguous on `long` values.**
+  Insert an explicit `.ToString()` to disambiguate.
+
 ## [0.2.2] — 2026-08-27
 
 ### Added — PRD-10 Multi-user team mode

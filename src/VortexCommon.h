@@ -330,6 +330,13 @@ namespace Vortex {
             Console::Error->WriteLine("ERROR: " + msg);
         }
 
+        static void Warn(String^ msg) {
+            ConsoleColor prev = Console::ForegroundColor;
+            Console::ForegroundColor = ConsoleColor::Yellow;
+            Console::WriteLine("  ⚠ " + msg);
+            Console::ForegroundColor = prev;
+        }
+
         static void Ok(String^ msg) {
             Console::WriteLine("  ✓ " + msg);
         }
