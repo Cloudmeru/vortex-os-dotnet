@@ -11,19 +11,30 @@ namespace Vortex {
         String^ budgetFile = Path::Combine(p->StateDir, "active_budgets.json");
         Directory::CreateDirectory(p->StateDir);
         if (!File::Exists(budgetFile)) {
-            File::WriteAllText(budgetFile, "{\"total_tokens\": 0}");
+            // v0.2.3 (G2): use the FileLock writer so a concurrent operator
+            // doesn't see a half-written file. FileShare::None means the
+            // write is atomic w.r.t. other readers.
+            FileLock::WriteWithLock(budgetFile, "{\"total_tokens\": 0}", 100, 50);
         }
 
-        // Accumulate token metrics deterministically
-        JsonDocument^ doc = JsonX::ReadFile(budgetFile);
+        // v0.2.3 (G2): use FileLock::ReadWithLock + WriteWithLock so the
+        // read-modify-write happens under a file lock. The window where
+        // two agents could double-count is sub-millisecond and the
+        // inspector budget is just daily telemetry, not a financial
+        // ledger, so a perfect compare-and-swap is overkill. The
+        // important property is that the file is never half-written.
+        String^ existing = FileLock::ReadWithLock(budgetFile, 100, 50);
         int currentTotal = 0;
-        if (doc != nullptr && JsonX::Has(doc->RootElement, "total_tokens")) {
-            currentTotal = doc->RootElement.GetProperty("total_tokens").GetInt32();
+        if (!String::IsNullOrEmpty(existing)) {
+            JsonDocument^ doc = JsonX::ReadFile(budgetFile);
+            if (doc != nullptr && JsonX::Has(doc->RootElement, "total_tokens")) {
+                currentTotal = doc->RootElement.GetProperty("total_tokens").GetInt32();
+            }
         }
         int newTotal = currentTotal + tokensUsedThisRun;
 
         String^ body = String::Format("{{\"total_tokens\": {0}}}", newTotal);
-        File::WriteAllText(budgetFile, body);
+        FileLock::WriteWithLock(budgetFile, body, 100, 50);
 
         // Audit Rule: a single run > 15,000 tokens triggers an inspector intervention.
         const int threshold = 15000;

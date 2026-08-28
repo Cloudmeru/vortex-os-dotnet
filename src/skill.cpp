@@ -341,7 +341,7 @@ static int CmdAuditTrail(Paths^ p) {
 
 // Print the version banner. Matches _meta.json `version` (0.1.0).
 static int CmdVersion() {
-    Console::WriteLine("VORTEX-OS Vortex.dll 0.2.2 (C++/CLI on PowerShell 7+, .NET 10)");
+    Console::WriteLine("VORTEX-OS Vortex.dll 0.2.3 (C++/CLI on PowerShell 7+, .NET 10)");
     return 0;
 }
 
@@ -1061,6 +1061,12 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
             if (args[i] == "--project" && i + 1 < args->Length) { proj = args[i + 1]; break; }
         }
         return CmdBudgetShow(p, proj);
+    }
+    if (cmd == "--vector-hydrate") {
+        // v0.2.3 (G4): expose Commands::VectorHydrate as a CLI command so
+        // the operator (and the test suite) can manually trigger the
+        // vector store hydrate. Returns 0 on success.
+        return Commands::VectorHydrate(p);
     }
 
     // HITL -------------------------------------------------------------------

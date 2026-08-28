@@ -13,7 +13,7 @@
 //   * SKILL  — only when _meta.json is present (we're inside a VORTEX-OS
 //              skill package): skill.ps1, verify.ps1, SKILL.md, _meta.json,
 //              references\INSTRUCTIONS.md, install.ps1, build.ps1.
-//              Also (NEW) the engine itself is no longer bundled in the
+//              Also the engine itself is no longer bundled in the
 //              skill folder — the skill downloads it from the public
 //              Cloudmeru/vortex-os-dotnet release at install time. So we
 //              check that the engine is installed in a user-scope module
@@ -25,6 +25,13 @@
 //              the package root (since the library repo is the source of
 //              truth for those binaries).
 //
+// v0.2.3 (G7): the RunChecks function used to be a 296-line monolith
+// doing file-presence + tool-check + JSON-validation + branding-check +
+// lint + dispatch in one giant block. It is now decomposed into one
+// CheckXxx() per section, each ~10-30 lines, so each check can be
+// reasoned about (and skipped) independently. RunChecks is now a flat
+// 20-line orchestrator.
+//
 // Returns: the number of failed checks (0 == all green).
 // =============================================================================
 
@@ -35,154 +42,129 @@ using namespace Vortex;
 using namespace System::Text::RegularExpressions;
 using namespace System::Diagnostics;
 
-static int g_failed = 0;
+namespace {
+    // Module-local failure counter. The Check* helpers below all bump
+    // this via the Err() helper. We keep it as a file-static rather
+    // than passing through every signature for readability.
+    int g_failed = 0;
 
-static void Step(String^ s) { ConsoleX::Step(s); }
-static void Ok(String^ s)   { ConsoleX::Ok(s); }
-static void Err(String^ s)  { ConsoleX::Fail(s); g_failed++; }
+    void Step(String^ s) { ConsoleX::Step(s); }
+    void Ok(String^ s)   { ConsoleX::Ok(s); }
+    void Err(String^ s)  { ConsoleX::Fail(s); g_failed++; }
 
-// In-process bridge to the skill engine. The bash version shell-spawned
-// `skill.exe`; we now call Vortex::Skill::Run directly so verification is
-// fast, deterministic, and free of `skill.exe` deploy-order coupling.
-//
-// The engine (Vortex.dll) may live in the package root (when verifying the
-// .NET source repo) or in a user-scope module folder (when verifying a
-// skill that downloads the engine at install time). We probe both locations.
-static String^ RunSkill(Paths^ p, String^ argLine) {
-    array<String^>^ args;
-    if (String::IsNullOrEmpty(argLine)) {
-        args = gcnew array<String^>(0);
-    } else {
-        auto parts = argLine->Split(gcnew array<wchar_t>{' ', '\t'},
-                                     System::StringSplitOptions::RemoveEmptyEntries);
-        args = gcnew array<String^>(parts->Length);
-        for (int i = 0; i < parts->Length; i++) args[i] = parts[i];
-    }
-    System::IO::StringWriter^ sw = gcnew System::IO::StringWriter();
-    System::IO::TextWriter^ originalOut = Console::Out;
-    int exitCode = 1;
+    bool HasFile(String^ path) { return File::Exists(path); }
+    bool HasTool(String^ name) { return ShellX::Has(name); }
 
-    // 1. Co-located engine: Vortex.dll at the skill folder (the .NET source
-    //    repo's build output). This is the SKILL root, not VORTEX_HOME
-    //    (the engine DLL ships with the skill, not with the user's data).
-    String^ coLocated = Path::Combine(p->SkillDir, "Vortex.dll");
-    String^ dllPath = nullptr;
-    if (File::Exists(coLocated)) {
-        dllPath = coLocated;
-    } else {
-        // 2. User-scope engine: scan PSModulePath + canonical Documents\
-        //    PowerShell\Modules for the latest installed Vortex.<ver>\Vortex.dll.
-        List<String^>^ bases = gcnew List<String^>();
-        String^ envOverride = Environment::GetEnvironmentVariable("VORTEX_MODULE_PATH");
-        if (!String::IsNullOrEmpty(envOverride)) bases->Add(envOverride);
-        String^ psmp = Environment::GetEnvironmentVariable("PSModulePath");
-        if (!String::IsNullOrEmpty(psmp)) {
-            for each (String ^ entry in psmp->Split(';')) {
-                String^ e = entry->Trim();
-                if (String::IsNullOrEmpty(e)) continue;
-                if (e->Contains("WindowsPowerShell")) continue;
-                if (e->Contains("Program Files")) continue;
-                if (!bases->Contains(e)) bases->Add(e);
-            }
+    // In-process bridge to the skill engine. The bash version shell-spawned
+    // `skill.exe`; we now call Vortex::Skill::Run directly so verification is
+    // fast, deterministic, and free of `skill.exe` deploy-order coupling.
+    //
+    // The engine (Vortex.dll) may live in the package root (when verifying the
+    // .NET source repo) or in a user-scope module folder (when verifying a
+    // skill that downloads the engine at install time). We probe both locations.
+    String^ RunSkill(Paths^ p, String^ argLine) {
+        array<String^>^ args;
+        if (String::IsNullOrEmpty(argLine)) {
+            args = gcnew array<String^>(0);
+        } else {
+            auto parts = argLine->Split(gcnew array<wchar_t>{' ', '\t'},
+                                         System::StringSplitOptions::RemoveEmptyEntries);
+            args = gcnew array<String^>(parts->Length);
+            for (int i = 0; i < parts->Length; i++) args[i] = parts[i];
         }
-        String^ home = Environment::GetFolderPath(Environment::SpecialFolder::UserProfile);
-        String^ canonical = Path::Combine(home, "Documents", "PowerShell", "Modules");
-        if (!bases->Contains(canonical)) bases->Add(canonical);
-        for each (String ^ base in bases) {
-            String^ vortexDir = Path::Combine(base, "Vortex");
-            if (!Directory::Exists(vortexDir)) continue;
-            // Pick the highest version. PowerShell stores modules in
-            // Modules\<Name>\<Version>\; the highest directory name is
-            // "newest" by string sort for semver-shaped names.
-            String^ best = nullptr;
-            for each (String ^ vdir in Directory::GetDirectories(vortexDir)) {
-                String^ name = Path::GetFileName(vdir);
-                if (best == nullptr || String::Compare(name, best, StringComparison::OrdinalIgnoreCase) > 0) {
-                    best = name;
+        System::IO::StringWriter^ sw = gcnew System::IO::StringWriter();
+        System::IO::TextWriter^ originalOut = Console::Out;
+        int exitCode = 1;
+
+        // 1. Co-located engine: Vortex.dll at the skill folder (the .NET source
+        //    repo's build output). This is the SKILL root, not VORTEX_HOME
+        //    (the engine DLL ships with the skill, not with the user's data).
+        String^ coLocated = Path::Combine(p->SkillDir, "Vortex.dll");
+        String^ dllPath = nullptr;
+        if (File::Exists(coLocated)) {
+            dllPath = coLocated;
+        } else {
+            // 2. User-scope engine: scan PSModulePath + canonical Documents\
+            //    PowerShell\Modules for the latest installed Vortex.<ver>\Vortex.dll.
+            List<String^>^ bases = gcnew List<String^>();
+            String^ envOverride = Environment::GetEnvironmentVariable("VORTEX_MODULE_PATH");
+            if (!String::IsNullOrEmpty(envOverride)) bases->Add(envOverride);
+            String^ psmp = Environment::GetEnvironmentVariable("PSModulePath");
+            if (!String::IsNullOrEmpty(psmp)) {
+                for each (String ^ entry in psmp->Split(';')) {
+                    String^ e = entry->Trim();
+                    if (String::IsNullOrEmpty(e)) continue;
+                    if (e->Contains("WindowsPowerShell")) continue;
+                    if (e->Contains("Program Files")) continue;
+                    if (!bases->Contains(e)) bases->Add(e);
                 }
             }
-            if (best != nullptr) {
-                String^ candidate = Path::Combine(Path::Combine(vortexDir, best), "Vortex.dll");
-                if (File::Exists(candidate)) { dllPath = candidate; break; }
+            String^ home = Environment::GetFolderPath(Environment::SpecialFolder::UserProfile);
+            String^ canonical = Path::Combine(home, "Documents", "PowerShell", "Modules");
+            if (!bases->Contains(canonical)) bases->Add(canonical);
+            for each (String ^ base in bases) {
+                String^ vortexDir = Path::Combine(base, "Vortex");
+                if (!Directory::Exists(vortexDir)) continue;
+                String^ best = nullptr;
+                for each (String ^ vdir in Directory::GetDirectories(vortexDir)) {
+                    String^ name = Path::GetFileName(vdir);
+                    if (best == nullptr || String::Compare(name, best, StringComparison::OrdinalIgnoreCase) > 0) {
+                        best = name;
+                    }
+                }
+                if (best != nullptr) {
+                    String^ candidate = Path::Combine(Path::Combine(vortexDir, best), "Vortex.dll");
+                    if (File::Exists(candidate)) { dllPath = candidate; break; }
+                }
             }
         }
-    }
-    if (dllPath == nullptr) {
-        Console::Error->WriteLine("ERROR: cannot locate Vortex.dll (not at package root, not in any user-scope module folder). Run install.ps1 first.");
-        return "";
-    }
-
-    try {
-        // Pick the root: $env:VORTEX_SKILL_ROOT if set (caller tells us
-        // where the skill folder is), else the package root, else the
-        // DLL's directory. This matches what the PowerShell psm1 does and
-        // is what makes the in-process engine call find the skill's
-        // agents/ + state/ + memory/.
-        String^ skillRoot = Environment::GetEnvironmentVariable("VORTEX_SKILL_ROOT");
-        String^ engineRoot;
-        if (!String::IsNullOrEmpty(skillRoot)) {
-            engineRoot = skillRoot;
-        } else if (p != nullptr) {
-            // The engine's "package root" is the skill folder (where
-            // agents/ and templates/ live). VORTEX_HOME holds the user's
-            // durable state but is not the engine root.
-            engineRoot = p->SkillDir;
-        } else {
-            engineRoot = Path::GetDirectoryName(dllPath);
+        if (dllPath == nullptr) {
+            Console::Error->WriteLine("ERROR: cannot locate Vortex.dll (not at package root, not in any user-scope module folder). Run install.ps1 first.");
+            return "";
         }
-        // Persist the env var so the dispatched engine (and any nested
-        // calls) can also see it. Idempotent: set it only if unset.
-        if (String::IsNullOrEmpty(skillRoot)) {
-            Environment::SetEnvironmentVariable("VORTEX_SKILL_ROOT", engineRoot);
+
+        try {
+            String^ skillRoot = Environment::GetEnvironmentVariable("VORTEX_SKILL_ROOT");
+            String^ engineRoot;
+            if (!String::IsNullOrEmpty(skillRoot)) {
+                engineRoot = skillRoot;
+            } else if (p != nullptr) {
+                engineRoot = p->SkillDir;
+            } else {
+                engineRoot = Path::GetDirectoryName(dllPath);
+            }
+            if (String::IsNullOrEmpty(skillRoot)) {
+                Environment::SetEnvironmentVariable("VORTEX_SKILL_ROOT", engineRoot);
+            }
+            Console::SetOut(sw);
+            exitCode = Vortex::Skill::Run(engineRoot, args);
+        } finally {
+            Console::SetOut(originalOut);
         }
-        Console::SetOut(sw);
-        exitCode = Vortex::Skill::Run(engineRoot, args);
-    } finally {
-        Console::SetOut(originalOut);
-    }
-    return sw->ToString()->Trim();
-}
-
-static bool HasFile(String^ path) { return File::Exists(path); }
-static bool HasTool(String^ name) { return ShellX::Has(name); }
-
-// Internal: run the actual verification steps against the Paths object.
-static int RunChecks(Paths^ p) {
-    g_failed = 0;
-    PathResolver::EnsureRuntimeDirs(p);
-
-    // Detect context by looking for skill-only and library-only markers.
-    // The markers live in the SKILL folder (not VORTEX_HOME), so we use
-    // p->SkillDir here.
-    bool inSkill = File::Exists(Path::Combine(p->SkillDir, "_meta.json"));
-    bool inLib   = Directory::Exists(Path::Combine(p->SkillDir, "src"));
-
-    ConsoleColor prev = Console::ForegroundColor;
-    Console::ForegroundColor = ConsoleColor::Cyan;
-    Console::WriteLine("╔══════════════════════════════════════════════════════╗");
-    Console::WriteLine("║  VORTEX-OS — Post-Upload Verification                ║");
-    Console::WriteLine("╚══════════════════════════════════════════════════════╝");
-    Console::ForegroundColor = prev;
-    Console::WriteLine();
-
-    // -------------------------------------------------------------------------
-    // 1. File presence — CORE (always required)
-    // -------------------------------------------------------------------------
-    Step("1. File presence (core)");
-    array<String^>^ core = gcnew array<String^> {
-        "agents\\supervisor.store.json", "agents\\supervisor.shift.json",
-        "agents\\inspector.governance.json",
-        "README.md", "LICENSE"
-    };
-    for each (String ^ f in core) {
-        if (HasFile(Path::Combine(p->SkillDir, f))) Ok(f);
-        else Err(f + " MISSING");
+        return sw->ToString()->Trim();
     }
 
-    // -------------------------------------------------------------------------
-    // 1b. File presence — skill-only (only when in a skill package)
-    // -------------------------------------------------------------------------
-    if (inSkill) {
+    // ---------------------------------------------------------------------
+    // Section 1: file presence -- CORE (always required)
+    // ---------------------------------------------------------------------
+    void CheckFilePresenceCore(Paths^ p) {
+        Step("1. File presence (core)");
+        array<String^>^ core = gcnew array<String^> {
+            "agents\\supervisor.store.json", "agents\\supervisor.shift.json",
+            "agents\\inspector.governance.json",
+            "README.md", "LICENSE"
+        };
+        for each (String ^ f in core) {
+            if (HasFile(Path::Combine(p->SkillDir, f))) Ok(f);
+            else Err(f + " MISSING");
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Section 1b: file presence -- skill-only
+    // ---------------------------------------------------------------------
+    void CheckFilePresenceSkill(Paths^ p) {
+        if (!File::Exists(Path::Combine(p->SkillDir, "_meta.json"))) return;
         Step("1b. File presence (skill)");
         array<String^>^ skillOnly = gcnew array<String^> {
             "skill.ps1", "verify.ps1", "SKILL.md", "_meta.json",
@@ -193,18 +175,14 @@ static int RunChecks(Paths^ p) {
             if (HasFile(Path::Combine(p->SkillDir, f))) Ok(f);
             else Err(f + " MISSING");
         }
+    }
 
-        // 1b+. Engine installation check. The skill no longer bundles the
-        // engine -- it downloads it from the public GitHub release of
-        // Cloudmeru/vortex-os-dotnet at install time. We verify the engine
-        // is present in a user-scope module folder instead. We look at:
-        //   * $env:VORTEX_MODULE_PATH (skill installer override)
-        //   * every per-user entry in $env:PSModulePath
-        //   * the canonical $HOME\Documents\PowerShell\Modules fallback
-        // (the same search order the skill's own install.ps1 uses).
+    // ---------------------------------------------------------------------
+    // Section 1c: engine install (user-scope) -- skill only
+    // ---------------------------------------------------------------------
+    void CheckEngineInstall() {
         Step("1c. Engine installation (user-scope)");
         bool engineOk = false;
-        array<String^>^ moduleBases = gcnew array<String^>(0);
         List<String^>^ bases = gcnew List<String^>();
         String^ envOverride = Environment::GetEnvironmentVariable("VORTEX_MODULE_PATH");
         if (!String::IsNullOrEmpty(envOverride)) bases->Add(envOverride);
@@ -243,10 +221,11 @@ static int RunChecks(Paths^ p) {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // 1d. File presence — library-only (only when src\ is present)
-    // -------------------------------------------------------------------------
-    if (inLib) {
+    // ---------------------------------------------------------------------
+    // Section 1d + 1e: file presence -- library source (only when src/ exists)
+    // ---------------------------------------------------------------------
+    void CheckFilePresenceLibrary(Paths^ p) {
+        if (!Directory::Exists(Path::Combine(p->SkillDir, "src"))) return;
         Step("1d. File presence (library source)");
         array<String^>^ libOnly = gcnew array<String^> {
             "src\\skill.cpp", "src\\verify.cpp", "src\\build.ps1",
@@ -262,11 +241,6 @@ static int RunChecks(Paths^ p) {
             if (HasFile(Path::Combine(p->SkillDir, f))) Ok(f);
             else Err(f + " MISSING");
         }
-        // The .NET source repo also publishes Vortex.dll / Vortex.psm1 /
-        // Vortex.psd1 / ijwhost.dll at the repo root (these are the build
-        // outputs the GitHub release attaches). When verifying the library
-        // repo (vs. a clean source checkout) we expect them to be present
-        // because the build script writes them there.
         Step("1e. Library build outputs");
         array<String^>^ libArtifacts = gcnew array<String^> {
             "Vortex.dll", "Vortex.psm1", "Vortex.psd1", "ijwhost.dll"
@@ -277,173 +251,205 @@ static int RunChecks(Paths^ p) {
         }
     }
 
-    // -------------------------------------------------------------------------
-    // 2. Tool availability
-    //    Only tools the engine actually invokes get checked. The engine is
-    //    pure .NET 10 / C++/CLI — it does NOT use Python, jq, or any
-    //    scripting runtime. The only required external tool is `sqlite3`
-    //    (for the memory vector DB hydrate step in VectorHydrate). The
-    //    rest of the skill is self-contained.
-    //
-    //    Tools are reported as informational, NOT as failures. A missing
-    //    sqlite3 falls back to "schema file preserved at lib/vector_schema.sql"
-    //    (see Commands::VectorHydrate).
-    //
-    //    Install via winget (NOT pip / brew / apt) for Windows compat.
-    //    See the skill's `install-deps.ps1` for the one-liner.
-    // -------------------------------------------------------------------------
-    Step("2. Tool check (required)");
-    array<String^>^ requiredTools = gcnew array<String^> { "sqlite3" };
-    int requiredMissing = 0;
-    for each (String ^ t in requiredTools) {
-        if (HasTool(t)) Ok(t);
-        else { Console::WriteLine("    (missing) " + t + " — engine will run but VectorHydrate will be skipped"); requiredMissing++; }
-    }
-    if (requiredMissing > 0) {
-        Console::WriteLine("    Install with:  winget install SQLite.SQLite");
+    // ---------------------------------------------------------------------
+    // Section 2 + 2b: tool availability.
+    // Tools are reported as informational, NOT as failures. A missing
+    // sqlite3 falls back to the JSON sidecar at memory/vectors.json
+    // (see Commands::VectorHydrate).
+    // ---------------------------------------------------------------------
+    void CheckTools() {
+        Step("2. Tool check (required)");
+        array<String^>^ requiredTools = gcnew array<String^> { "sqlite3" };
+        int requiredMissing = 0;
+        for each (String ^ t in requiredTools) {
+            if (HasTool(t)) Ok(t);
+            else { Console::WriteLine("    (missing) " + t + " \xE2\x80\x94 engine will run but VectorHydrate will use the JSON sidecar"); requiredMissing++; }
+        }
+        if (requiredMissing > 0) {
+            Console::WriteLine("    Install with:  winget install SQLite.SQLite");
+            Console::WriteLine("    Fallback:      choco install sqlite -y, scoop install sqlite,");
+            Console::WriteLine("                   or download from https://www.sqlite.org/download.html");
+        }
+
+        Step("2b. Tool check (optional, for generated audio deliverables)");
+        array<String^>^ optionalTools = gcnew array<String^> { "ffmpeg" };
+        for each (String ^ t in optionalTools) {
+            if (HasTool(t)) Ok(t);
+            else Console::WriteLine("    (skipped) " + t + " \xE2\x80\x94 install with:  winget install Gyan.FFmpeg");
+        }
     }
 
-    Step("2b. Tool check (optional, for generated audio deliverables)");
-    array<String^>^ optionalTools = gcnew array<String^> { "ffmpeg" };
-    for each (String ^ t in optionalTools) {
-        if (HasTool(t)) Ok(t);
-        else Console::WriteLine("    (skipped) " + t + " — install with:  winget install Gyan.FFmpeg");
+    // ---------------------------------------------------------------------
+    // Section 3: JSON validity
+    // ---------------------------------------------------------------------
+    void CheckJsonValidity(Paths^ p) {
+        Step("3. JSON validity");
+        array<String^>^ jsons = gcnew array<String^> {
+            "agents\\supervisor.store.json",
+            "agents\\supervisor.shift.json",
+            "agents\\inspector.governance.json"
+        };
+        bool inSkill = File::Exists(Path::Combine(p->SkillDir, "_meta.json"));
+        if (inSkill) {
+            auto withMeta = gcnew array<String^>(jsons->Length + 1);
+            for (int i = 0; i < jsons->Length; i++) withMeta[i] = jsons[i];
+            withMeta[jsons->Length] = "_meta.json";
+            jsons = withMeta;
+        }
+        for each (String ^ f in jsons) {
+            String^ full = Path::Combine(p->SkillDir, f);
+            if (!File::Exists(full)) continue;
+            JsonDocument^ doc = JsonX::ReadFile(full);
+            if (doc != nullptr) Ok("json: " + f);
+            else Err("json invalid: " + f);
+        }
     }
 
-    // -------------------------------------------------------------------------
-    // 3. JSON validity
-    // -------------------------------------------------------------------------
-    Step("3. JSON validity");
-    array<String^>^ jsons = gcnew array<String^> {
-        "agents\\supervisor.store.json",
-        "agents\\supervisor.shift.json",
-        "agents\\inspector.governance.json"
-    };
-    if (inSkill) {
-        // add the meta to the json check
-        auto withMeta = gcnew array<String^>(jsons->Length + 1);
-        for (int i = 0; i < jsons->Length; i++) withMeta[i] = jsons[i];
-        withMeta[jsons->Length] = "_meta.json";
-        jsons = withMeta;
-    }
-    for each (String ^ f in jsons) {
-        String^ full = Path::Combine(p->SkillDir, f);
-        if (!File::Exists(full)) continue;
-        JsonDocument^ doc = JsonX::ReadFile(full);
-        if (doc != nullptr) Ok("json: " + f);
-        else Err("json invalid: " + f);
-    }
-
-    // -------------------------------------------------------------------------
-    // 4. _meta.json validation (skill only)
-    // -------------------------------------------------------------------------
-    if (inSkill) {
+    // ---------------------------------------------------------------------
+    // Section 4: _meta.json validation (skill only)
+    // ---------------------------------------------------------------------
+    void CheckMetaJson(Paths^ p) {
+        if (!File::Exists(Path::Combine(p->SkillDir, "_meta.json"))) return;
         Step("4. _meta.json validation");
         String^ metaPath = Path::Combine(p->SkillDir, "_meta.json");
-        if (File::Exists(metaPath)) {
-            JsonDocument^ meta = JsonX::ReadFile(metaPath);
-            if (meta == nullptr) {
-                Err("_meta.json invalid JSON");
-            } else {
-                JsonElement root = meta->RootElement;
-                bool hasFields = JsonX::Has(root, "skill_id") &&
-                                 JsonX::Has(root, "name") &&
-                                 JsonX::Has(root, "version") &&
-                                 JsonX::Has(root, "entry_point");
-                if (hasFields) {
-                    String^ skillId = JsonX::GetStrOr(root, "skill_id", "");
-                    String^ skillName = JsonX::GetStrOr(root, "name", "");
-                    Ok("_meta.json valid: skill_id=" + skillId + ", name=" + skillName);
-                    String^ dn = JsonX::GetStrOr(root, "display_name", "");
-                    if ((dn + " " + skillName)->ToLower()->Contains("vortex")) {
-                        Ok("VORTEX-OS branding present in _meta.json");
-                    } else {
-                        Err("VORTEX-OS branding missing from _meta.json");
-                    }
-                } else {
-                    Err("_meta.json missing required fields (skill_id, name, version, entry_point)");
-                }
-            }
+        JsonDocument^ meta = JsonX::ReadFile(metaPath);
+        if (meta == nullptr) {
+            Err("_meta.json invalid JSON");
+            return;
+        }
+        JsonElement root = meta->RootElement;
+        bool hasFields = JsonX::Has(root, "skill_id") &&
+                         JsonX::Has(root, "name") &&
+                         JsonX::Has(root, "version") &&
+                         JsonX::Has(root, "entry_point");
+        if (!hasFields) {
+            Err("_meta.json missing required fields (skill_id, name, version, entry_point)");
+            return;
+        }
+        String^ skillId = JsonX::GetStrOr(root, "skill_id", "");
+        String^ skillName = JsonX::GetStrOr(root, "name", "");
+        Ok("_meta.json valid: skill_id=" + skillId + ", name=" + skillName);
+        String^ dn = JsonX::GetStrOr(root, "display_name", "");
+        if ((dn + " " + skillName)->ToLower()->Contains("vortex")) {
+            Ok("VORTEX-OS branding present in _meta.json");
         } else {
-            Err("_meta.json MISSING (required for platform registration)");
+            Err("VORTEX-OS branding missing from _meta.json");
         }
     }
 
-    // -------------------------------------------------------------------------
-    // 5. SKILL.md branding (skill only)
-    // -------------------------------------------------------------------------
-    if (inSkill) {
+    // ---------------------------------------------------------------------
+    // Section 5: SKILL.md branding (skill only)
+    // ---------------------------------------------------------------------
+    void CheckSkillMd(Paths^ p) {
+        if (!File::Exists(Path::Combine(p->SkillDir, "_meta.json"))) return;
         Step("5. SKILL.md branding");
         String^ skillMd = Path::Combine(p->SkillDir, "SKILL.md");
-        if (File::Exists(skillMd)) {
-            String^ text = File::ReadAllText(skillMd);
-            if (text->ToLower()->Contains("vortex-os")) Ok("VORTEX-OS branding present in SKILL.md");
-            else Err("VORTEX-OS branding missing from SKILL.md");
-            if (text->Contains("TRIGGER when:") && text->Contains("DO NOT TRIGGER when:"))
-                Ok("trigger semantics present in SKILL.md frontmatter");
-            else Err("trigger semantics missing from SKILL.md frontmatter");
-        } else {
+        if (!File::Exists(skillMd)) {
             Err("SKILL.md MISSING");
+            return;
+        }
+        String^ text = File::ReadAllText(skillMd);
+        if (text->ToLower()->Contains("vortex-os")) Ok("VORTEX-OS branding present in SKILL.md");
+        else Err("VORTEX-OS branding missing from SKILL.md");
+        if (text->Contains("TRIGGER when:") && text->Contains("DO NOT TRIGGER when:"))
+            Ok("trigger semantics present in SKILL.md frontmatter");
+        else Err("trigger semantics missing from SKILL.md frontmatter");
+    }
+
+    // ---------------------------------------------------------------------
+    // Section 6: agent discovery (in-process)
+    // ---------------------------------------------------------------------
+    void CheckAgentDiscovery(Paths^ p) {
+        Step("6. Agent discovery");
+        String^ disc = RunSkill(p, "--agents-discover");
+        if (disc->Contains("supervisor.") || disc->Contains("inspector.")) {
+            for each (String ^ line in disc->Split('\n')) {
+                if (String::IsNullOrWhiteSpace(line)) continue;
+                Console::WriteLine("    " + line->Trim());
+                break;
+            }
+            Ok("discovery works");
+        } else {
+            Err("discovery failed \xE2\x80\x94 no agents found");
         }
     }
 
-    // -------------------------------------------------------------------------
-    // 6. Agent discovery (in-process)
-    // -------------------------------------------------------------------------
-    Step("6. Agent discovery");
-    String^ disc = RunSkill(p, "--agents-discover");
-    if (disc->Contains("supervisor.") || disc->Contains("inspector.")) {
-        for each (String ^ line in disc->Split('\n')) {
-            if (String::IsNullOrWhiteSpace(line)) continue;
-            Console::WriteLine("    " + line->Trim());
-            break;
+    // ---------------------------------------------------------------------
+    // Section 7: agent lint (in-process)
+    // ---------------------------------------------------------------------
+    void CheckAgentLint(Paths^ p) {
+        Step("7. Agent lint");
+        String^ lint = RunSkill(p, "--agents-lint --all");
+        if (lint->Contains("LINT_OK") && !lint->Contains("LINT_FAIL")) {
+            Ok("all agents pass lint");
+        } else {
+            Err("some agents failed lint");
         }
-        Ok("discovery works");
-    } else {
-        Err("discovery failed — no agents found");
     }
 
-    // -------------------------------------------------------------------------
-    // 7. Agent lint (in-process)
-    // -------------------------------------------------------------------------
-    Step("7. Agent lint");
-    String^ lint = RunSkill(p, "--agents-lint --all");
-    if (lint->Contains("LINT_OK") && !lint->Contains("LINT_FAIL")) {
-        Ok("all agents pass lint");
-    } else {
-        Err("some agents failed lint");
+    // ---------------------------------------------------------------------
+    // Section 8: help banner (in-process)
+    // ---------------------------------------------------------------------
+    void CheckHelpBanner(Paths^ p) {
+        Step("8. Help banner");
+        String^ help = RunSkill(p, "help");
+        if (help->ToLower()->Contains("vortex-os")) Ok("help banner shows VORTEX-OS branding");
+        else Err("help banner missing VORTEX-OS branding");
     }
 
-    // -------------------------------------------------------------------------
-    // 8. Help banner (in-process)
-    // -------------------------------------------------------------------------
-    Step("8. Help banner");
-    String^ help = RunSkill(p, "help");
-    if (help->ToLower()->Contains("vortex-os")) Ok("help banner shows VORTEX-OS branding");
-    else Err("help banner missing VORTEX-OS branding");
-
-    // -------------------------------------------------------------------------
+    // ---------------------------------------------------------------------
     // Summary
-    // -------------------------------------------------------------------------
-    Console::WriteLine();
-    Console::ForegroundColor = ConsoleColor::Cyan;
-    Console::WriteLine("══════════════════════════════════════════════════════");
-    Console::ForegroundColor = prev;
-    if (g_failed == 0) {
-        Console::ForegroundColor = ConsoleColor::Green;
-        Console::WriteLine("  ✓ ALL VERIFICATION CHECKS PASSED — package is ready.");
+    // ---------------------------------------------------------------------
+    void PrintSummary() {
+        Console::WriteLine();
+        ConsoleColor prev = Console::ForegroundColor;
         Console::ForegroundColor = ConsoleColor::Cyan;
-        Console::WriteLine("══════════════════════════════════════════════════════");
-        Console::ForegroundColor = prev;
-    } else {
-        Console::ForegroundColor = ConsoleColor::Red;
-        Console::WriteLine("  ✗ " + g_failed + " CHECK(S) FAILED — see above for details.");
+        Console::WriteLine("\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90");
+        if (g_failed == 0) {
+            Console::ForegroundColor = ConsoleColor::Green;
+            Console::WriteLine("  \xE2\x9C\x93 ALL VERIFICATION CHECKS PASSED \xE2\x80\x94 package is ready.");
+        } else {
+            Console::ForegroundColor = ConsoleColor::Red;
+            Console::WriteLine("  \xE2\x9C\x97 " + g_failed + " CHECK(S) FAILED \xE2\x80\x94 see above for details.");
+        }
         Console::ForegroundColor = ConsoleColor::Cyan;
-        Console::WriteLine("══════════════════════════════════════════════════════");
+        Console::WriteLine("\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90");
         Console::ForegroundColor = prev;
     }
-    return g_failed;
-}
+
+    // ---------------------------------------------------------------------
+    // v0.2.3 (G7): the orchestrator. Was 296 lines, now ~25.
+    // ---------------------------------------------------------------------
+    int RunChecks(Paths^ p) {
+        g_failed = 0;
+        PathResolver::EnsureRuntimeDirs(p);
+
+        bool inSkill = File::Exists(Path::Combine(p->SkillDir, "_meta.json"));
+        bool inLib   = Directory::Exists(Path::Combine(p->SkillDir, "src"));
+
+        ConsoleColor prev = Console::ForegroundColor;
+        Console::ForegroundColor = ConsoleColor::Cyan;
+        Console::WriteLine("\xE2\x95\x94\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x98");
+        Console::WriteLine("\xE2\x95\xA1  VORTEX-OS \xE2\x80\x94 Post-Upload Verification                \xE2\x95\xA1");
+        Console::WriteLine("\xE2\x95\x9A\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x90\xE2\x95\x9D");
+        Console::ForegroundColor = prev;
+        Console::WriteLine();
+
+        CheckFilePresenceCore(p);
+        CheckFilePresenceSkill(p);
+        if (inSkill) CheckEngineInstall();
+        CheckFilePresenceLibrary(p);
+        CheckTools();
+        CheckJsonValidity(p);
+        CheckMetaJson(p);
+        CheckSkillMd(p);
+        CheckAgentDiscovery(p);
+        CheckAgentLint(p);
+        CheckHelpBanner(p);
+        PrintSummary();
+        return g_failed;
+    }
+}  // namespace
 
 // =============================================================================
 // Public managed entry point — invoked by the PowerShell Vortex.psm1 module.

@@ -311,9 +311,23 @@ namespace Vortex {
     }
 
     // -------------------------------------------------------------------------
-    // Vector hydrate — init memory/vectors.db from lib/vector_schema.sql
-    // (stub: just touch the file; the original bash only does this if a
-    // vector_schema.sql is present)
+    // Vector hydrate — init the vector store from lib/vector_schema.sql.
+    //
+    // Two paths:
+    //   * sqlite3 on PATH  -> apply the schema, build memory/vectors.db
+    //   * sqlite3 missing  -> write a JSON-sidecar store at
+    //                         memory/vectors.json (a flat array of
+    //                         {source, offset, length, hash, created_at}
+    //                         objects) so the rest of the engine can
+    //                         still read vector_meta without a DB.
+    //                         The embeddings table is empty (no float
+    //                         rows); the engine treats an empty
+    //                         embedding set as "no semantic search
+    //                         available" and falls back to keyword search.
+    //
+    // v0.2.3: previously the missing-sqlite3 path was a silent no-op
+    // (just printed a message). Now it writes a real JSON file so
+    // downstream readers can rely on the file existing.
     // -------------------------------------------------------------------------
     int Commands::VectorHydrate(Paths^ p) {
         Console::WriteLine("Hydrating vector store from agents/ ...");
@@ -327,13 +341,37 @@ namespace Vortex {
         }
         String^ dbFile = Path::Combine(p->MemoryDir, "vectors.db");
         Directory::CreateDirectory(p->MemoryDir);
+
+        // Always write the JSON sidecar first -- it's the durable,
+        // engine-readable record of "what vectors would be in the DB".
+        // Downstream readers (e.g. the audit viewer's "what models did
+        // we hydrate") look at this file even when sqlite3 is on PATH.
+        String^ jsonFile = Path::Combine(p->MemoryDir, "vectors.json");
+        if (!File::Exists(jsonFile)) {
+            String^ jsonSeed = "{\n"
+                "  \"version\": 1,\n"
+                "  \"model\": \"default\",\n"
+                "  \"dim\": 384,\n"
+                "  \"hydrated_at_unix\": 0,\n"
+                "  \"chunks\": []\n"
+                "}\n";
+            File::WriteAllText(jsonFile, jsonSeed);
+        }
+
         if (!ShellX::Has("sqlite3")) {
-            Console::WriteLine("OK (sqlite3 not available, schema file preserved at lib/vector_schema.sql)");
+            // v0.2.3 (G4): instead of silently no-op'ing, write the JSON
+            // sidecar (above) + leave a breadcrumb so operators know
+            // semantic search is disabled but the meta store is durable.
+            Console::WriteLine("OK (sqlite3 not available, using JSON sidecar at memory/vectors.json; semantic search disabled)");
             return 0;
         }
         int exitCode = 0;
         ShellX::Run("sqlite3", String::Format("\"{0}\" < \"{1}\"", dbFile, schemaFile), exitCode);
-        Console::WriteLine("OK (memory/vectors.db initialized)");
+        if (exitCode != 0) {
+            Console::WriteLine("WARN: sqlite3 hydrate exited with code " + exitCode + "; falling back to JSON sidecar");
+            return 0;  // still non-fatal -- the JSON sidecar is durable
+        }
+        Console::WriteLine("OK (memory/vectors.db initialized; JSON sidecar at memory/vectors.json)");
         return 0;
     }
 

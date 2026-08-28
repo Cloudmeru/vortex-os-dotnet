@@ -2,6 +2,7 @@
 // VORTEX-OS - Packager Worker implementation
 // =============================================================================
 #include "Packager.h"
+#include "Audit.h"
 
 using namespace System::Security::Cryptography;
 
@@ -56,6 +57,19 @@ namespace Vortex {
             : p->ProjectDeliverablesDir;
         Directory::CreateDirectory(dstDir);
 
+        // v0.2.3 (G1): the audit log is the operator's source of truth for
+        // "what happened in this dispatch". The packager was previously a
+        // silent no-op in the audit log (Packager::Package never called
+        // Audit::Emit). The agent registry and the older samples assume
+        // a "worker.packager" agent, so we emit dispatch_start + deliver
+        // + dispatch_end at the T3 tier with that name. The agent name
+        // matches the comment in idea-future-recommendations.md "G1".
+        String^ agentName = "worker.packager";
+        String^ taskId = swarmId;  // use the swarm id as the task id; one task == one packaging run
+        Audit::Emit(p, "T3", agentName, "dispatch_start", "received",
+            projectName, taskId, "LOW", "", "", "package_swarm",
+            gcnew array<String^> { swarmId, projectName, dryRun ? "dry-run" : "real" }, 0);
+
         ConsoleX::Banner("VORTEX-OS - Packaging Swarm " + swarmId);
         Console::WriteLine("  Source:      " + srcDir);
         Console::WriteLine("  Destination: " + dstDir);
@@ -97,6 +111,13 @@ namespace Vortex {
                     "\"copied_at\": \"{3}\" }}",
                     JsonX::EscapeJson(name), len, sum,
                     DateTime::Now.ToString("yyyy-MM-ddTHH:mm:ss", System::Globalization::CultureInfo::InvariantCulture)));
+                // v0.2.3 (G1): one audit line per delivered file so the
+                // audit viewer can show each "deliver" action with the
+                // file name as a tag. Same shape as the T4 worker in
+                // DispatchV4.
+                Audit::Emit(p, "T3", agentName, "deliver", "ok",
+                    projectName, taskId, "LOW", "", "", name,
+                    gcnew array<String^> { "packager", name, sum }, len);
                 copied++;
             } catch (Exception^ ex) {
                 ConsoleX::Fail("Copy failed: " + name + "  (" + ex->Message + ")");
@@ -114,7 +135,7 @@ namespace Vortex {
             sb->AppendLine("  \"swarm_id\": \"" + JsonX::EscapeJson(swarmId) + "\",");
             sb->AppendLine("  \"project\": \"" + JsonX::EscapeJson(projectName) + "\",");
             sb->AppendLine("  \"packaged_at\": \"" + DateTime::Now.ToString("yyyy-MM-ddTHH:mm:ss", System::Globalization::CultureInfo::InvariantCulture) + "\",");
-            sb->AppendLine("  \"engine_version\": \"0.2.2\",");
+            sb->AppendLine("  \"engine_version\": \"0.2.3\",");
             sb->AppendLine("  \"summary\": { \"copied\": " + copied + ", \"skipped\": " + skipped + ", \"failed\": " + failed + " },");
             sb->AppendLine("  \"files\": [");
             for (int i = 0; i < manifest->Count; i++) {
@@ -130,6 +151,17 @@ namespace Vortex {
 
         Console::WriteLine();
         Console::WriteLine("  Summary: " + copied + " copied, " + skipped + " skipped, " + failed + " failed");
+
+        // v0.2.3 (G1): close the dispatch with a dispatch_end line.
+        // status is "ok" if nothing failed, "partial" if some files
+        // were skipped (refuse-to-overwrite is expected, not an
+        // error), "failed" if any copy failed. Same vocabulary as
+        // DispatchV4.
+        String^ finalStatus = failed > 0 ? "failed" : (skipped > 0 ? "partial" : "ok");
+        Audit::Emit(p, "T3", agentName, "dispatch_end", finalStatus,
+            projectName, taskId, failed > 0 ? "HIGH" : "LOW", "", "", "package_swarm",
+            gcnew array<String^> { swarmId, finalStatus, "copied=" + copied, "skipped=" + skipped, "failed=" + failed }, 0);
+
         if (failed > 0) return 1;
         if (skipped > 0) {
             Console::WriteLine();

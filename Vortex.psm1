@@ -20,9 +20,31 @@ $ErrorActionPreference = 'Stop'
 
 # --- PS edition / version guard ---------------------------------------------
 # Requires PowerShell 7+ (Core edition) because Vortex.dll targets .NET 10,
-# which PS5 / Windows PowerShell cannot load.
+# which PS5 / Windows PowerShell cannot load. The error message points
+# the operator at install-powershell7.ps1 (shipped with the skill) so a
+# fresh Windows install with only PS5.1 can bootstrap itself without
+# having to know about winget / msi / pwsh first.
 if ($PSVersionTable.PSEdition -ne 'Core' -or $PSVersionTable.PSVersion.Major -lt 7) {
-    throw "VORTEX-OS requires PowerShell 7+ (Core). Detected: $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))."
+    $msg = @"
+VORTEX-OS requires PowerShell 7+ (Core edition) because Vortex.dll targets .NET 10,
+which the built-in Windows PowerShell 5.1 cannot load.
+
+  Detected:  $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))
+  Need:      PowerShell 7.2+ (Core)
+
+Bootstrap PowerShell 7 from this PowerShell 5.1 session by running:
+
+  powershell -NoProfile -ExecutionPolicy Bypass -File `"$PSScriptRoot\install-powershell7.ps1`"
+
+Or, if you already have pwsh 7 installed, just invoke this module with `pwsh` instead
+of `powershell`: `pwsh -NoProfile -Command "Import-Module Vortex; Get-VortexAgent"`.
+
+The install-powershell7.ps1 script downloads the official Microsoft PS7 MSI to a
+temp folder and runs it silently with /quiet /norestart flags. It works on
+Windows 10 1809+ and Server 2019+. No admin elevation is required when running
+under the current user's context.
+"@
+    throw $msg
 }
 
 # --- Locate the package root and load the C++/CLI DLL -----------------------
@@ -217,6 +239,30 @@ function Get-VortexLastExitCode {
     return $script:VortexLastRc
 }
 
+function Get-VortexVersion {
+<#
+.SYNOPSIS
+    Print the VORTEX-OS engine version (loaded Vortex.dll).
+.DESCRIPTION
+    The version is read from the Vortex.psd1 manifest next to Vortex.dll
+    (the same ModuleVersion field the release workflow publishes). This is
+    the canonical answer to "which engine is installed"; equivalent to
+    running `skill.ps1 --version` but does not require the skill to be
+    on disk.
+.EXAMPLE
+    PS> Get-VortexVersion
+    0.2.2
+#>
+    [CmdletBinding()]
+    param()
+    $psd1 = Join-Path $script:VortexRoot 'Vortex.psd1'
+    if (-not (Test-Path $psd1)) {
+        throw "Vortex.psd1 not found at $psd1. The Vortex module is corrupt or incomplete."
+    }
+    $meta = Import-PowerShellDataFile -LiteralPath $psd1
+    return $meta.ModuleVersion
+}
+
 function Get-VortexPlugin {
 <#
 .SYNOPSIS
@@ -243,15 +289,308 @@ function Get-VortexPlugin {
     }
 }
 
+# v0.2.3 (G11): expose more wrapper commands as standalone cmdlets so
+# users don't have to round-trip through skill.ps1 for the common ops.
+# These are thin wrappers (single-arg pass-throughs) -- the engine
+# remains the source of truth for argument parsing and behavior.
+
+function Get-VortexDecision {
+<#
+.SYNOPSIS
+    List the operator decision history (memory\decision_history.json).
+.DESCRIPTION
+    Returns each decision as a row: task, gate, severity, choice, reason,
+    timestamp. CRITICAL/HIGH decisions are highlighted.
+.EXAMPLE
+    PS> Get-VortexDecision
+#>
+    [CmdletBinding()]
+    param()
+    Invoke-Skill -Arguments @('--decision-list')
+}
+
+function Send-VortexDecision {
+<#
+.SYNOPSIS
+    Record an operator decision (gate answer) in the decision history.
+.DESCRIPTION
+    Mirrors the --decision-record engine command. Decisions are
+    append-only and feed the decision_history.json file that the
+    DispatchV4 prompt builder reads to inject "operator notes" into
+    the next dispatch.
+.PARAMETER Task
+    The task_id this decision applies to.
+.PARAMETER Gate
+    The gate name (e.g. "g1", "g2_moral_hinge").
+.PARAMETER Choice
+    The operator's choice text.
+.PARAMETER Reason
+    Free-form justification (stored in the audit log).
+.PARAMETER Severity
+    LOW / MEDIUM / HIGH / CRITICAL. Default: HIGH.
+.PARAMETER Episode
+    Optional episode number for episodic projects.
+.EXAMPLE
+    PS> Send-VortexDecision -Task ep1 -Gate g1 -Severity HIGH -Choice "approve script" -Reason "looks good" -Episode 1
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Task,
+        [Parameter(Mandatory)] [string] $Gate,
+        [Parameter(Mandatory)] [string] $Choice,
+        [string] $Reason = '',
+        [ValidateSet('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')] [string] $Severity = 'HIGH',
+        [int] $Episode = 0
+    )
+    $args = @('--decision-record', '--task', $Task, '--gate', $Gate,
+              '--severity', $Severity, '--choice', $Choice, '--reason', $Reason)
+    if ($Episode -gt 0) { $args += @('--episode', $Episode) }
+    Invoke-Skill -Arguments $args
+}
+
+function Get-VortexCostReport {
+<#
+.SYNOPSIS
+    Print the cost rollup across all dispatched agents.
+.DESCRIPTION
+    Same as --cost-report. By default prints a text table. Pass -Json
+    for the machine-readable rollup (use this with ConvertFrom-Json).
+.PARAMETER Project
+    Filter to a single project.
+.PARAMETER Since
+    Only show dispatches from the last N days.
+.PARAMETER Agent
+    Filter to a single agent.
+.PARAMETER AsJson
+    Return the rollup as JSON.
+.EXAMPLE
+    PS> Get-VortexCostReport
+    PS> Get-VortexCostReport -Project my_project -Since 7
+    PS> Get-VortexCostReport -AsJson | ConvertFrom-Json
+#>
+    [CmdletBinding()]
+    param(
+        [string] $Project,
+        [int] $Since = 0,
+        [string] $Agent,
+        [switch] $AsJson
+    )
+    $args = @('--cost-report')
+    if ($Project) { $args += @('--project', $Project) }
+    if ($Since   -gt 0) { $args += @('--since', $Since) }
+    if ($Agent)  { $args += @('--agent',  $Agent) }
+    if ($AsJson) { $args += '--json' }
+    Invoke-Skill -Arguments $args
+}
+
+function Get-VortexProjectBudget {
+<#
+.SYNOPSIS
+    Show a project's budget (tokens_total, usd_total, so_far, % used).
+.PARAMETER Project
+    The project slug (e.g. "trial_of_echoes"). Defaults to the current
+    $env:VORTEX_PROJECT if set.
+.EXAMPLE
+    PS> Get-VortexProjectBudget -Project my_project
+#>
+    [CmdletBinding()]
+    param(
+        [string] $Project = $env:VORTEX_PROJECT
+    )
+    $args = @('--budget-show')
+    if ($Project) { $args += @('--project', $Project) }
+    Invoke-Skill -Arguments $args
+}
+
+function Set-VortexProjectBudget {
+<#
+.SYNOPSIS
+    Write a per-project budget to deliverables\<project>\_meta.json.
+.DESCRIPTION
+    A budget alert at 80% yields a PENDING_HUMAN gate (severity MEDIUM);
+    at 100% the gate is CRITICAL. Alerts are rate-limited to once per
+    day per project.
+.PARAMETER Project
+    The project slug.
+.PARAMETER TokensTotal
+    Token budget (optional).
+.PARAMETER UsdTotal
+    USD budget (optional).
+.EXAMPLE
+    PS> Set-VortexProjectBudget -Project my_project -UsdTotal 5.00
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $Project,
+        [long]   $TokensTotal = 0,
+        [double] $UsdTotal    = 0
+    )
+    $args = @('--budget-set', '--project', $Project)
+    if ($TokensTotal -gt 0) { $args += @('--tokens-total', $TokensTotal) }
+    if ($UsdTotal    -gt 0) { $args += @('--usd-total',    $UsdTotal) }
+    Invoke-Skill -Arguments $args
+}
+
+function Get-VortexAgentGraph {
+<#
+.SYNOPSIS
+    Print the agent dependency graph (T0 -> T1 -> T2 -> T3 + T4).
+.PARAMETER Format
+    ascii (default) or mermaid. The mermaid format is suitable for
+    pasting into a Markdown document.
+.EXAMPLE
+    PS> Get-VortexAgentGraph
+    PS> Get-VortexAgentGraph -Format mermaid
+#>
+    [CmdletBinding()]
+    param(
+        [ValidateSet('ascii', 'mermaid')] [string] $Format = 'ascii'
+    )
+    Invoke-Skill -Arguments @('--agents-graph', '--format', $Format)
+}
+
+function Test-VortexAgent {
+<#
+.SYNOPSIS
+    Lint one or all agents. Returns $true if all pass, $false otherwise.
+.PARAMETER Name
+    The agent name. If omitted, lints all agents.
+.EXAMPLE
+    PS> Test-VortexAgent
+    PS> Test-VortexAgent -Name supervisor.store
+#>
+    [CmdletBinding()]
+    param(
+        [string] $Name
+    )
+    $target = if ($Name) { $Name } else { '--all' }
+    $lint = Invoke-Skill -Arguments @('--agents-lint', $target)
+    return ($lint -match 'LINT_OK') -and ($lint -notmatch 'LINT_FAIL')
+}
+
+function Start-VortexPackage {
+<#
+.SYNOPSIS
+    Package one swarm's intermediate deliverables into the project's
+    durable deliverables/ directory.
+.DESCRIPTION
+    Writes a .manifest.json next to the deliverables and refuses to
+    overwrite any file that already exists at the target (per ADR-015).
+    Use -DryRun to preview what would be copied.
+.PARAMETER SwarmId
+    The swarm id (looks for swarms\active_<swarmId>\deliverables\).
+.PARAMETER DryRun
+    Print what would happen, don't actually copy.
+.EXAMPLE
+    PS> Start-VortexPackage -SwarmId my_swarm_001
+    PS> Start-VortexPackage -SwarmId my_swarm_001 -DryRun
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $SwarmId,
+        [switch] $DryRun
+    )
+    $args = @('--package', $SwarmId)
+    if ($DryRun) { $args += '--dry-run' }
+    Invoke-Skill -Arguments $args
+}
+
+function Get-VortexStream {
+<#
+.SYNOPSIS
+    List the in-progress dispatches (those with a .started manifest in
+    state\<user>\in_progress\<id>).
+.DESCRIPTION
+    v0.2.2: per-user sharding means the InProgressDir is
+    state\<user>\in_progress\ when team_mode is on, or state\in_progress\
+    otherwise. The output table includes a 'started' timestamp + the
+    partials count, and a final 'in_progress: <path>' line.
+.EXAMPLE
+    PS> Get-VortexStream
+#>
+    [CmdletBinding()]
+    param()
+    Invoke-Skill -Arguments @('--stream-list')
+}
+
+function Send-VortexStreamHint {
+<#
+.SYNOPSIS
+    Append an operator hint to a streaming dispatch's .hints.jsonl file.
+.DESCRIPTION
+    The next dispatch in the chain reads this file and injects the
+    hints as "operator notes" in the prompt. Use this to steer an
+    in-progress dispatch without waiting for it to finish.
+.PARAMETER TaskId
+    The in-progress task id.
+.PARAMETER Text
+    The hint text (e.g. "Tone is too dark, lighten the next scene").
+.EXAMPLE
+    PS> Send-VortexStreamHint -TaskId ep2_smoke -Text "Tone is too dark"
+#>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)] [string] $TaskId,
+        [Parameter(Mandatory)] [string] $Text
+    )
+    Invoke-Skill -Arguments @('--hint', $TaskId, '--text', $Text)
+}
+
+function Get-VortexTeamConfig {
+<#
+.SYNOPSIS
+    Print the loaded team-mode config + the resolved per-user shard paths.
+.DESCRIPTION
+    v0.2.2: reads $VORTEX_HOME\.vortex\config.json and dumps it as JSON
+    plus the resolved Paths. Useful for verifying that team_mode is
+    on (or off) and that the per-user shards point at the right place.
+.EXAMPLE
+    PS> Get-VortexTeamConfig
+#>
+    [CmdletBinding()]
+    param()
+    Invoke-Skill -Arguments @('--team-config')
+}
+
+function Invoke-VortexVectorHydrate {
+<#
+.SYNOPSIS
+    Initialize the vector store at memory\vectors.db (or the JSON
+    sidecar if sqlite3 is not on PATH).
+.DESCRIPTION
+    v0.2.3: applies lib\vector_schema.sql when sqlite3 is available;
+    otherwise writes a memory\vectors.json sidecar so downstream readers
+    have a durable artifact.
+.EXAMPLE
+    PS> Invoke-VortexVectorHydrate
+#>
+    [CmdletBinding()]
+    param()
+    Invoke-Skill -Arguments @('--vector-hydrate')
+}
+
 # --- Module export ----------------------------------------------------------
 Export-ModuleMember -Function @(
     'Invoke-Vortex'
     'Get-VortexAgent'
+    'Get-VortexAgentGraph'
+    'Test-VortexAgent'
     'Get-VortexAuditTrail'
     'Get-VortexHitlPending'
     'Approve-VortexHitl'
     'Deny-VortexHitl'
+    'Get-VortexDecision'
+    'Send-VortexDecision'
+    'Get-VortexCostReport'
+    'Get-VortexProjectBudget'
+    'Set-VortexProjectBudget'
+    'Start-VortexPackage'
+    'Get-VortexStream'
+    'Send-VortexStreamHint'
+    'Get-VortexTeamConfig'
+    'Invoke-VortexVectorHydrate'
     'Test-VortexPackage'
     'Get-VortexLastExitCode'
+    'Get-VortexVersion'
     'Get-VortexPlugin'
 )
