@@ -421,9 +421,44 @@ static int CmdAuditTrail(Paths^ p) {
     return 0;
 }
 
-// Print the version banner. Matches _meta.json `version` (0.1.0).
+// Print the version banner. v0.3.6: read ModuleVersion from Vortex.psd1
+// at runtime instead of hardcoding. The Vortex.psd1 is located in the
+// same directory as the loaded Vortex.dll (via Assembly::GetExecutingAssembly),
+// so this works for both the source-tree build AND the user-scope install.
+// Falls back to "0.3.0" if the manifest can't be read (preserves the
+// v0.3.0-v0.3.5 behavior).
 static int CmdVersion() {
-    Console::WriteLine("VORTEX-OS Vortex.dll 0.3.0 (C++/CLI on PowerShell 7+, .NET 10)");
+    String^ version = "0.3.0";
+    try {
+        // 1. Try the loaded Vortex.dll's directory (best -- always
+        //    matches the loaded module regardless of cwd or VORTEX_MODULE_PATH).
+        String^ dllDir;
+        try {
+            // Fully qualified to avoid C++/CLI keyword collision with `asm`.
+            System::Reflection::Assembly^ loadedAsm =
+                System::Reflection::Assembly::GetExecutingAssembly();
+            String^ asmPath = loadedAsm->Location;
+            if (!String::IsNullOrEmpty(asmPath)) {
+                dllDir = Path::GetDirectoryName(asmPath);
+            }
+        } catch (Exception^) {}
+        if (String::IsNullOrEmpty(dllDir)) {
+            // 2. Fall back to cwd (works for source-tree builds where
+            //    Vortex.dll and Vortex.psd1 sit next to the run cwd).
+            try { dllDir = Directory::GetCurrentDirectory(); } catch (Exception^) {}
+        }
+        if (!String::IsNullOrEmpty(dllDir)) {
+            String^ psd1Path = Path::Combine(dllDir, "Vortex.psd1");
+            if (File::Exists(psd1Path)) {
+                auto doc = JsonX::ReadFile(psd1Path);
+                if (doc != nullptr) {
+                    JsonElement el = JsonX::GetProp(doc->RootElement, "ModuleVersion");
+                    if (el.ValueKind == JsonValueKind::String) version = el.GetString();
+                }
+            }
+        }
+    } catch (Exception^) {}
+    Console::WriteLine("VORTEX-OS Vortex.dll " + version + " (C++/CLI on PowerShell 7+, .NET 10)");
     return 0;
 }
 
@@ -1033,24 +1068,45 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         return CmdDispatchTemplate(p, args[1], ep, overrides->ToArray(), taskId);
     }
     if (cmd == "--recipe") {
-        // v0.3.5: --recipe <name> resolves to templates/<name>.json and
-        // forwards to --dispatch-template. Equivalent to
-        //   skill.ps1 --recipe cinematic-short
-        // vs
-        //   skill.ps1 --dispatch-template templates\cinematic-short.json
-        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --recipe <name> [--episode-number N] [--task <id>] [--template-var k=v]..."); return 2; }
+        // v0.3.5 + v0.3.6 fix: --recipe <name> resolves to
+        // templates/<name>.json and forwards to --dispatch-template.
+        // Also handles --source <path> / --source-file <path> by
+        // converting to the template's substitution key. Currently
+        // media-tutorial-video.json uses {{source_markdown}} and
+        // cinematic-short.json uses {{source_markdown}} too, so --source
+        // is rewritten to --template-var source_markdown=<path>.
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --recipe <name> [--source <file> | --source-file <file>] [--task <id>] [--template-var k=v]..."); return 2; }
         String^ name = args[1];
         String^ templatePath = Path::Combine(p->TemplatesDir, name + ".json");
         if (!File::Exists(templatePath)) {
             ConsoleX::Err("Recipe not found: " + templatePath + " (looked in " + p->TemplatesDir + ")");
             return 2;
         }
-        // Forward as --dispatch-template <path> followed by the rest of the args
-        array<String^>^ forwarded = gcnew array<String^>((args->Length - 1) + 1);
-        forwarded[0] = "--dispatch-template";
-        forwarded[1] = templatePath;
-        for (int i = 2; i < args->Length; i++) forwarded[i - 1] = args[i];
-        return Vortex::Skill::Run(args[0], forwarded);
+        // Build the forwarded arg array. --source / --source-file are
+        // rewritten to --template-var source_markdown=<path> so the
+        // existing --dispatch-template path can find them.
+        auto forwarded = gcnew List<String^>();
+        forwarded->Add("--dispatch-template");
+        forwarded->Add(templatePath);
+        for (int i = 2; i < args->Length; i++) {
+            String^ a = args[i];
+            if (a == "--source" && i + 1 < args->Length) {
+                forwarded->Add("--template-var");
+                forwarded->Add("source_markdown=" + args[++i]);
+            } else if (a == "--source-file" && i + 1 < args->Length) {
+                forwarded->Add("--template-var");
+                forwarded->Add("source_markdown=" + args[++i]);
+            } else if (a->StartsWith("--source=")) {
+                forwarded->Add("--template-var");
+                forwarded->Add("source_markdown=" + a->Substring(9));
+            } else if (a->StartsWith("--source-file=")) {
+                forwarded->Add("--template-var");
+                forwarded->Add("source_markdown=" + a->Substring(14));
+            } else {
+                forwarded->Add(a);
+            }
+        }
+        return Vortex::Skill::Run(args[0], forwarded->ToArray());
     }
     if (cmd == "--package") {
         if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --package <swarm_id> [--dry-run]"); return 2; }
