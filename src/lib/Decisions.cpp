@@ -132,4 +132,27 @@ namespace Vortex {
         }
         return sb->ToString();
     }
+
+    // ---------------------------------------------------------------------
+    // FormatJson (v0.3.10, Phase 1 / G34)
+    // ---------------------------------------------------------------------
+    // Returns the decision history as a single-line JSON object:
+    //   {"decisions":[ {<row>}, {<row>}, ... ]}
+    // where each <row> is the verbatim JSON object that Append wrote to
+    // decision_history.json. We rebuild the array from ReadAll (a
+    // JsonElement) so the consumer sees the same data the engine stored
+    // -- no field renaming, no date formatting, no truncation.
+    String^ Decisions::FormatJson(Paths^ p) {
+        JsonElement arr = ReadAll(p);
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"decisions\":[");
+        if (arr.ValueKind == JsonValueKind::Array) {
+            for (int i = 0; i < arr.GetArrayLength(); i++) {
+                if (i > 0) sb->Append(",");
+                sb->Append(arr[i].GetRawText());
+            }
+        }
+        sb->Append("]}");
+        return sb->ToString();
+    }
 }

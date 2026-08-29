@@ -4,6 +4,85 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.10] — 2026-08-29
+
+### Added — Phase 1 of the cross-OS CLI JSON contract
+
+This release locks down the 35-verb CLI as a stable, machine-readable
+contract that any host (PowerShell, Python, Go, Rust, `jq`) can consume
+without writing a custom parser. The full spec is in the new file
+`docs/cli-json-contract.md`; the short version is:
+
+- Every data-emitting verb accepts a `--json` flag.
+- In `--json` mode the engine emits **exactly one line of JSON** on
+  stdout. No banner, no progress, no pretty-printing.
+- The top level is a bare array (list verbs) or bare object (single
+  result). No `{"ok":true,"data":...}` envelope.
+- Errors come out as `{"error":"<reason>","path":"<opt>"}` on the
+  **same** stdout stream (so a single pipe captures both data and
+  errors).
+- Field names use `snake_case`. Numbers are invariant culture.
+- Missing data is `null` (objects) or `[]` (arrays), not omitted.
+
+### New `--json` modes (6 of ~33 verbs)
+
+| Verb | Output shape |
+|---|---|
+| `--memory-show <slug> --json` | `{"project","operator","prior_projects[]","series","chars","truncated"}` (G32) |
+| `--budget-show --project X --json` | `{"project","tokens_total","usd_total","so_far{tokens,usd}","percent_used"}` (G33) |
+| `--decision-list --json` | `{"decisions":[{"ts","task_id","gate","severity","choice","reason","episode_number"}]}` (G34) |
+| `--plugins-list --json` | `{"plugins":[{"name","version","capability","source"}],"total"}` (G35) |
+| `--team-config --json` | `{"config"\|null,"paths":{"state_dir","pending_approvals_dir","audit_log_file","tasks_dir","in_progress_dir"}}` (G36) |
+| `--stream-list --json` | `{"streams":[{"task_id","started_at","partials"}],"total","in_progress"}` (G37) |
+
+The existing `--json` flags on `--agents-discover` and `--cost-report`
+(added in v0.1.x and v0.2.x respectively) are unchanged.
+
+### PowerShell shim
+
+5 of the 23 `*-Vortex*` cmdlets now expose a `-AsJson` switch:
+
+```powershell
+PS> Get-VortexDecision -AsJson | ConvertFrom-Json
+PS> Get-VortexProjectBudget -Project trial-of-echoes -AsJson | ConvertFrom-Json
+PS> Get-VortexPlugin -AsJson | Where-Object source -eq 'user'
+PS> Get-VortexStream -AsJson
+PS> Get-VortexTeamConfig -AsJson
+```
+
+Each switch forwards `--json` to the engine and pipes the result.
+The text mode is unchanged. `Get-VortexMemory` is **not** affected
+(it serves a different purpose -- it reads the per-project
+fingerprints, not the prior-context slice).
+
+### Tests
+
+`tests/test_engine.ps1` G32-G37 (6 new sub-sections, 30+ new
+assertions) pin the contract: every test calls the engine with
+`--json`, asserts the output is valid JSON, asserts it's a single
+line, and asserts the documented fields are present with the
+documented types. The first sub-assertion in each block is a
+`ConvertFrom-Json` round-trip so any future regression in the
+shape immediately fails the suite.
+
+### Documentation
+
+The new file `docs/cli-json-contract.md` codifies the rules
+(single line, no envelope, snake_case, invariant culture, error
+shape, when to add `--json` to a new verb). The CLI help
+(`--help` / no args) gets a new "GLOBAL FLAGS" section pointing
+at it.
+
+### Not yet in this release
+
+Phase 1 covers the 6 highest-value read-only verbs that the
+existing PS shim wraps. The remaining ~27 verbs (action verbs
+like `--hitl-approve`, inspectors like `--agents-inspect`,
+plugin and team mode actions) are scheduled for Phase 1.1+ in
+the same v0.3.10.x line. The JSON contract document already
+enumerates them and the test suite is structured to grow
+section-by-section.
+
 ## [0.3.9] — 2026-08-29
 
 ### Added — Reviewer-gate write path (completes the v0.3.5 half-feature)

@@ -500,10 +500,16 @@ static int CmdDecisionRecord(Paths^ p, String^ taskId, String^ gate, String^ sev
     return 0;
 }
 
-// Print the decision history as a one-liner-per-row table.
-static int CmdDecisionList(Paths^ p) {
-    ConsoleX::Banner("VORTEX-OS - Decision History");
-    Console::Write(Decisions::FormatTable(p));
+// Print the decision history. v0.3.10 (Phase 1, G34): --json mode emits
+// a single-line {"decisions":[...]} per docs/cli-json-contract.md.
+// Default mode is the human-readable table.
+static int CmdDecisionList(Paths^ p, bool asJson) {
+    if (asJson) {
+        Console::WriteLine(Decisions::FormatJson(p));
+    } else {
+        ConsoleX::Banner("VORTEX-OS - Decision History");
+        Console::Write(Decisions::FormatTable(p));
+    }
     return 0;
 }
 
@@ -577,23 +583,45 @@ static int CmdBudgetSet(Paths^ p, String^ project, long tokensTotal, double usdT
     return 0;
 }
 
-// Show the active budget for a project
-static int CmdBudgetShow(Paths^ p, String^ project) {
+// Show the active budget for a project. v0.3.10 (Phase 1, G33): --json
+// mode emits a single-line {"project":..,"tokens_total":..,...} per
+// docs/cli-json-contract.md. Default mode is the human-readable
+// banner + key/value block.
+static int CmdBudgetShow(Paths^ p, String^ project, bool asJson) {
     if (String::IsNullOrEmpty(project)) {
-        ConsoleX::Err("Usage: --budget-show --project <name>");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"--budget-show requires --project <name>\"}");
+        } else {
+            ConsoleX::Err("Usage: --budget-show --project <name>");
+        }
         return ExitCodes::BadInput;
     }
     long tokensTotal = 0;
     double usdTotal = 0.0;
     CostTracker::ResolveBudget(p, project, tokensTotal, usdTotal);
     double soFar = CostTracker::ProjectCostSoFar(p, project);
-    ConsoleX::Banner("Budget: " + project);
-    Console::WriteLine("  tokens_total: " + tokensTotal);
-    Console::WriteLine("  usd_total:    $" + usdTotal.ToString("F2"));
-    Console::WriteLine("  so_far:       $" + soFar.ToString("F6"));
-    if (usdTotal > 0) {
-        double pct = soFar / usdTotal * 100.0;
-        Console::WriteLine("  used:         " + pct.ToString("F1") + "%");
+    double pct = (usdTotal > 0) ? (soFar / usdTotal * 100.0) : 0.0;
+
+    if (asJson) {
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"project\":\""); sb->Append(JsonX::EscapeJson(project));
+        sb->Append("\",\"tokens_total\":"); sb->Append(tokensTotal);
+        sb->Append(",\"usd_total\":"); sb->Append(usdTotal.ToString("F6", System::Globalization::CultureInfo::InvariantCulture));
+        sb->Append(",\"so_far\":{");
+        sb->Append("\"usd\":"); sb->Append(soFar.ToString("F6", System::Globalization::CultureInfo::InvariantCulture));
+        sb->Append(",\"tokens\":0"); // token spend is not tracked per-project today; field reserved
+        sb->Append("},\"percent_used\":");
+        sb->Append(pct.ToString("F2", System::Globalization::CultureInfo::InvariantCulture));
+        sb->Append("}");
+        Console::WriteLine(sb->ToString());
+    } else {
+        ConsoleX::Banner("Budget: " + project);
+        Console::WriteLine("  tokens_total: " + tokensTotal);
+        Console::WriteLine("  usd_total:    $" + usdTotal.ToString("F2"));
+        Console::WriteLine("  so_far:       $" + soFar.ToString("F6"));
+        if (usdTotal > 0) {
+            Console::WriteLine("  used:         " + pct.ToString("F1") + "%");
+        }
     }
     return 0;
 }
@@ -800,25 +828,51 @@ static int CmdVersion() {
 // =============================================================================
 
 // List all discovered plugins (skill-scope + user-scope, user wins on conflict).
-// Output format: "name<TAB>version<TAB>capability<TAB>source"
-// where source is "skill" or "user".
-static int CmdPluginsList(Paths^ p) {
+// v0.3.10 (Phase 1, G35): --json mode emits a single-line
+//   {"plugins":[{"name":..,"version":..,"capability":..,"source":..},...],"total":N}
+// per docs/cli-json-contract.md. Default mode is the human-readable table.
+static int CmdPluginsList(Paths^ p, bool asJson) {
     auto plugins = Plugin::Discover(p->HomeDir, p->SkillDir);
     if (plugins->Count == 0) {
-        Console::WriteLine("  (no plugins found)");
-        Console::WriteLine("  Looked in: <skill>/plugins/  and  $VORTEX_HOME/plugins/");
+        if (asJson) {
+            Console::WriteLine("{\"plugins\":[],\"total\":0}");
+        } else {
+            Console::WriteLine("  (no plugins found)");
+            Console::WriteLine("  Looked in: <skill>/plugins/  and  $VORTEX_HOME/plugins/");
+        }
         return 0;
     }
-    Console::WriteLine("  {0,-22}  {1,-10}  {2,-14}  {3}", "name", "version", "capability", "source");
-    Console::WriteLine("  ----------------------  ----------  --------------  ------");
-    for each (String^ row in plugins) {
-        array<String^>^ parts = row->Split('\t');
-        if (parts->Length < 4) continue;
-        String^ source = parts[3]->Contains(p->HomeDir) ? "user" : "skill";
-        Console::WriteLine("  {0,-22}  {1,-10}  {2,-14}  {3}", parts[0], parts[1], parts[2], source);
+    if (asJson) {
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"plugins\":[");
+        bool first = true;
+        for each (String^ row in plugins) {
+            array<String^>^ parts = row->Split('\t');
+            if (parts->Length < 4) continue;
+            String^ source = parts[3]->Contains(p->HomeDir) ? "user" : "skill";
+            if (!first) sb->Append(",");
+            first = false;
+            sb->Append("{\"name\":\""); sb->Append(JsonX::EscapeJson(parts[0]));
+            sb->Append("\",\"version\":\""); sb->Append(JsonX::EscapeJson(parts[1]));
+            sb->Append("\",\"capability\":\""); sb->Append(JsonX::EscapeJson(parts[2]));
+            sb->Append("\",\"source\":\""); sb->Append(source);
+            sb->Append("\"}");
+        }
+        sb->Append("],\"total\":"); sb->Append(plugins->Count);
+        sb->Append("}");
+        Console::WriteLine(sb->ToString());
+    } else {
+        Console::WriteLine("  {0,-22}  {1,-10}  {2,-14}  {3}", "name", "version", "capability", "source");
+        Console::WriteLine("  ----------------------  ----------  --------------  ------");
+        for each (String^ row in plugins) {
+            array<String^>^ parts = row->Split('\t');
+            if (parts->Length < 4) continue;
+            String^ source = parts[3]->Contains(p->HomeDir) ? "user" : "skill";
+            Console::WriteLine("  {0,-22}  {1,-10}  {2,-14}  {3}", parts[0], parts[1], parts[2], source);
+        }
+        Console::WriteLine("");
+        Console::WriteLine("  Total: {0} plugin(s)", plugins->Count);
     }
-    Console::WriteLine("");
-    Console::WriteLine("  Total: {0} plugin(s)", plugins->Count);
     return 0;
 }
 
@@ -1083,17 +1137,49 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint) {
 // =============================================================================
 
 // --team-config: print the active team config (or the default if none).
-static int CmdTeamConfig(Paths^ p) {
+// v0.3.10 (Phase 1, G36): --json mode emits a single-line
+//   {"config":<obj-or-null>,"paths":{...}}
+// per docs/cli-json-contract.md. The "config" key is null when team
+// mode is off (no .vortex/config.json) so consumers can detect this
+// state without an error or empty object.
+static int CmdTeamConfig(Paths^ p, bool asJson) {
     String^ cfgPath = Path::Combine(p->HomeDir, ".vortex", "config.json");
-    if (!File::Exists(cfgPath)) {
+    bool configExists = File::Exists(cfgPath);
+    JsonDocument^ doc = configExists ? JsonX::ReadFile(cfgPath) : nullptr;
+
+    if (configExists && doc == nullptr) {
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"invalid config.json at " + JsonX::EscapeJson(cfgPath) + "\"}");
+        } else {
+            ConsoleX::Err("Invalid config.json at: " + cfgPath);
+        }
+        return 1;
+    }
+
+    if (asJson) {
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"config\":");
+        if (doc == nullptr) {
+            sb->Append("null");
+        } else {
+            sb->Append(doc->RootElement.GetRawText());
+        }
+        sb->Append(",\"paths\":{");
+        sb->Append("\"state_dir\":\"");            sb->Append(JsonX::EscapeJson(p->StateDir));            sb->Append("\",");
+        sb->Append("\"pending_approvals_dir\":\""); sb->Append(JsonX::EscapeJson(p->PendingApprovalsDir)); sb->Append("\",");
+        sb->Append("\"audit_log_file\":\"");       sb->Append(JsonX::EscapeJson(p->AuditLogFile));       sb->Append("\",");
+        sb->Append("\"tasks_dir\":\"");            sb->Append(JsonX::EscapeJson(p->TasksDir));            sb->Append("\",");
+        sb->Append("\"in_progress_dir\":\"");      sb->Append(JsonX::EscapeJson(p->InProgressDir));      sb->Append("\"");
+        sb->Append("}}");
+        Console::WriteLine(sb->ToString());
+        return 0;
+    }
+
+    // Text mode (unchanged)
+    if (!configExists) {
         Console::WriteLine("  (no .vortex/config.json; team mode is off -- default single-user mode)");
         Console::WriteLine("  Run skill\\setup-team.ps1 to enable team mode.");
         return 0;
-    }
-    JsonDocument^ doc = JsonX::ReadFile(cfgPath);
-    if (doc == nullptr) {
-        ConsoleX::Err("Invalid config.json at: " + cfgPath);
-        return 1;
     }
     JsonSerializerOptions^ opts = gcnew JsonSerializerOptions();
     opts->WriteIndented = true;
@@ -1115,13 +1201,60 @@ static int CmdTeamConfig(Paths^ p) {
 // Streaming (PRD-14)
 // =============================================================================
 
-// --stream-list: list in-progress dispatches.
-static int CmdStreamList(Paths^ p) {
+// --stream-list: list in-progress dispatches. v0.3.10 (Phase 1, G37):
+// --json mode emits a single-line
+//   {"streams":[{"task_id":..,"started_at":N,"partials":N},...],"total":N,"in_progress":"<path>"}
+// per docs/cli-json-contract.md. started_at is a Unix epoch (int64).
+// The "in_progress" key is the absolute path of the in-progress root
+// so consumers can locate the .partial files (e.g. an interactive
+// streamer UI).
+static int CmdStreamList(Paths^ p, bool asJson) {
     List<String^>^ tasks = StreamSink::ListInProgress(p);
     if (tasks->Count == 0) {
-        Console::WriteLine("  (no in-progress dispatches)");
+        if (asJson) {
+            Console::WriteLine("{\"streams\":[],\"total\":0,\"in_progress\":\"" +
+                JsonX::EscapeJson(p->InProgressDir) + "\"}");
+        } else {
+            Console::WriteLine("  (no in-progress dispatches)");
+        }
         return 0;
     }
+    if (asJson) {
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"streams\":[");
+        bool first = true;
+        for each (String^ taskId in tasks) {
+            String^ dir = Path::Combine(p->InProgressDir, taskId);
+            long startedAt = 0;
+            String^ startedFile = Path::Combine(dir, ".started");
+            if (File::Exists(startedFile)) {
+                try {
+                    JsonDocument^ sd = JsonX::ReadFile(startedFile);
+                    if (sd != nullptr && JsonX::Has(sd->RootElement, "started_at")) {
+                        startedAt = JsonX::GetLong(sd->RootElement, "started_at", 0);
+                    }
+                } catch (Exception^) {}
+            }
+            int partials = 0;
+            try {
+                for each (String^ f in Directory::GetFiles(dir)) {
+                    if (Path::GetFileName(f)->Contains(".partial")) partials++;
+                }
+            } catch (Exception^) {}
+            if (!first) sb->Append(",");
+            first = false;
+            sb->Append("{\"task_id\":\"" + JsonX::EscapeJson(taskId) + "\"");
+            sb->Append(",\"started_at\":"); sb->Append(startedAt);
+            sb->Append(",\"partials\":"); sb->Append(partials);
+            sb->Append("}");
+        }
+        sb->Append("],\"total\":"); sb->Append(tasks->Count);
+        sb->Append(",\"in_progress\":\""); sb->Append(JsonX::EscapeJson(p->InProgressDir));
+        sb->Append("\"}");
+        Console::WriteLine(sb->ToString());
+        return 0;
+    }
+    // Text mode (unchanged)
     Console::WriteLine("  {0,-22}  {1,-12}  {2}", "task_id", "started", "partials");
     Console::WriteLine("  ----------------------  ------------  --------");
     for each (String^ taskId in tasks) {
@@ -1236,6 +1369,13 @@ static int CmdHelp() {
     Console::WriteLine("USAGE:");
     Console::WriteLine("  skill.exe <command> [args]");
     Console::WriteLine("  skill.exe --version             Print version and exit");
+    Console::WriteLine();
+    Console::WriteLine("GLOBAL FLAGS:");
+    Console::WriteLine("  --json                         Emit a single-line JSON object instead of human-");
+    Console::WriteLine("                                readable text. Supported by every data-emitting verb");
+    Console::WriteLine("                                listed below. See docs/cli-json-contract.md for");
+    Console::WriteLine("                                the per-verb shape. Errors come out as");
+    Console::WriteLine("                                {\"error\":\"...\"} on the same stdout stream.");
     Console::WriteLine();
     Console::WriteLine("DISCOVERY & INSPECTION:");
     Console::WriteLine("  --agents-discover              List all available agents");
@@ -1504,7 +1644,13 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         }
         return CmdDecisionRecord(p, taskId, gate, sev, choice, reason, ep);
     }
-    if (cmd == "--decision-list") return CmdDecisionList(p);
+    if (cmd == "--decision-list") {
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; }
+        }
+        return CmdDecisionList(p, asJson);
+    }
 
     // Cost tracking ------------------------------------------------------------
     if (cmd == "--cost-report") {
@@ -1592,10 +1738,12 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     }
     if (cmd == "--budget-show") {
         String^ proj = nullptr;
+        bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--project" && i + 1 < args->Length) { proj = args[i + 1]; break; }
+            if (args[i] == "--project" && i + 1 < args->Length) { proj = args[i + 1]; i++; }
+            else if (args[i] == "--json")                       { asJson = true; }
         }
-        return CmdBudgetShow(p, proj);
+        return CmdBudgetShow(p, proj, asJson);
     }
     if (cmd == "--vector-hydrate") {
         // v0.2.3 (G4): expose Commands::VectorHydrate as a CLI command so
@@ -1632,17 +1780,34 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--memory-show") {
         // v0.3.0 (PRD-17): read the memory slice for a project. Returns
         // the empty string if no memory store exists.
-        String^ project = (args->Length >= 2) ? args[1] : p->ProjectName;
+        // v0.3.10 (Phase 1, G32): --json mode emits a structured object
+        // per docs/cli-json-contract.md; the text form is unchanged and
+        // remains the source of truth for prompt injection.
+        String^ project = nullptr;
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; }
+            else if (project == nullptr && !args[i]->StartsWith("--")) { project = args[i]; }
+        }
+        if (String::IsNullOrEmpty(project)) project = p->ProjectName;
         if (String::IsNullOrEmpty(project)) {
-            ConsoleX::Err("Usage: --memory-show <project_slug>");
+            if (asJson) {
+                Console::WriteLine("{\"error\":\"--memory-show requires a project slug or $VORTEX_PROJECT\"}");
+            } else {
+                ConsoleX::Err("Usage: --memory-show <project_slug>");
+            }
             return 2;
         }
-        String^ slice = Vortex::Memory::ReadForInjection(p, project);
-        if (String::IsNullOrEmpty(slice)) {
-            Console::WriteLine("(no memory slice for " + project + "; run --compile-memory first)");
-            return 0;
+        if (asJson) {
+            Console::WriteLine(Vortex::Memory::ReadForInjectionJson(p, project));
+        } else {
+            String^ slice = Vortex::Memory::ReadForInjection(p, project);
+            if (String::IsNullOrEmpty(slice)) {
+                Console::WriteLine("(no memory slice for " + project + "; run --compile-memory first)");
+                return 0;
+            }
+            Console::WriteLine(slice);
         }
-        Console::WriteLine(slice);
         return 0;
     }
 
@@ -1665,7 +1830,13 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--audit-trail")  return CmdAuditTrail(p);
 
     // Plugins ----------------------------------------------------------------
-    if (cmd == "--plugins-list")      return CmdPluginsList(p);
+    if (cmd == "--plugins-list") {
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; }
+        }
+        return CmdPluginsList(p, asJson);
+    }
     if (cmd == "--plugins-info") {
         if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --plugins-info <name>"); return 2; }
         return CmdPluginsInfo(p, args[1]);
@@ -1707,12 +1878,20 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
 
     // Team mode (PRD-10) -------------------------------------------------------
     if (cmd == "--team-config") {
-        return CmdTeamConfig(p);
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; }
+        }
+        return CmdTeamConfig(p, asJson);
     }
 
     // Streaming (PRD-14) -------------------------------------------------------
     if (cmd == "--stream-list") {
-        return CmdStreamList(p);
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; }
+        }
+        return CmdStreamList(p, asJson);
     }
     if (cmd == "--stream") {
         // --stream <task_id> [--auto-open]

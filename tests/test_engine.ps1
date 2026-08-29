@@ -1261,6 +1261,132 @@ Write-Output '===END==='
     Check "G31c: patch preserves Swarm::Spawn's swarm_id + tasks fields" { $g31PreservesOriginals }
 
     # -----------------------------------------------------------------------
+    # G32-G37: Phase 1 of the cross-OS contract (v0.3.10). These 6 tests
+    # assert the JSON output shape documented in docs/cli-json-contract.md
+    # for 6 read-only verbs. The contract is:
+    #   - single line, no envelope
+    #   - top-level array for lists, object for single results
+    #   - errors come out as {"error":"..."} on the same stdout stream
+    #   - missing data: null for objects, [] for arrays
+    # The test checks the output is valid JSON AND has the documented
+    # shape (top-level type + key fields). Future verb additions
+    # should follow the same pattern in this section.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "=== G32-G37: CLI JSON contract (v0.3.10) ===" -ForegroundColor Cyan
+
+    # G32: --memory-show --json returns {"project":..,"operator":..,
+    #     "prior_projects":[..],"series":..,"chars":N,"truncated":bool}
+    $g32Out = & pwsh -NoProfile -File $skillPath --memory-show smoke-g32 --json 2>&1 | Out-String
+    $g32Out = $g32Out.Trim()
+    $g32Json = $null
+    try { $g32Json = $g32Out | ConvertFrom-Json } catch {}
+    Check "G32a: --memory-show --json output is valid JSON" { $g32Json -ne $null }
+    Check "G32b: --memory-show --json is a single line" { -not ($g32Out.Contains([char]10) -or $g32Out.Contains([char]13)) }
+    Check "G32c: --memory-show --json top-level is an object" { $g32Json -is [pscustomobject] }
+    Check "G32d: --memory-show --json has project key" { $g32Json.PSObject.Properties['project'] -and $g32Json.project -eq 'smoke-g32' }
+    Check "G32e: --memory-show --json has operator key (null when no operator.json)" { $g32Json.PSObject.Properties['operator'] }
+    Check "G32f: --memory-show --json has prior_projects array" { $g32Json.PSObject.Properties['prior_projects'] -and $g32Json.prior_projects -is [array] }
+    Check "G32g: --memory-show --json has chars + truncated keys" {
+        $g32Json.PSObject.Properties['chars'] -and $g32Json.PSObject.Properties['truncated']
+    }
+
+    # G33: --budget-show --project X --json returns {"project":..,
+    #     "tokens_total":N,"usd_total":N,"so_far":{...},"percent_used":N}
+    $g33Proj = "smoke-g33-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    & pwsh -NoProfile -File $skillPath --budget-set --project $g33Proj --tokens-total 1000000 --usd-total 5.0 2>&1 | Out-Null
+    $g33Out = & pwsh -NoProfile -File $skillPath --budget-show --project $g33Proj --json 2>&1 | Out-String
+    $g33Out = $g33Out.Trim()
+    $g33Json = $null
+    try { $g33Json = $g33Out | ConvertFrom-Json } catch {}
+    Check "G33a: --budget-show --json output is valid JSON" { $g33Json -ne $null }
+    Check "G33b: --budget-show --json is a single line" { -not ($g33Out.Contains([char]10) -or $g33Out.Contains([char]13)) }
+    Check "G33c: --budget-show --json echoes the project name" { $g33Json.project -eq $g33Proj }
+    Check "G33d: --budget-show --json has tokens_total + usd_total" {
+        $g33Json.PSObject.Properties['tokens_total'] -and $g33Json.PSObject.Properties['usd_total']
+    }
+    Check "G33e: --budget-show --json has so_far sub-object" {
+        $g33Json.PSObject.Properties['so_far'] -and $g33Json.so_far -is [pscustomobject]
+    }
+    Check "G33f: --budget-show --json has percent_used" { $g33Json.PSObject.Properties['percent_used'] }
+    # G33g: --budget-show with no --project in JSON mode emits {"error":"..."}
+    $g33ErrOut = & pwsh -NoProfile -File $skillPath --budget-show --json 2>&1 | Out-String
+    $g33ErrJson = $null
+    try { $g33ErrJson = $g33ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G33g: --budget-show --json without --project emits {error:..}" {
+        $g33ErrJson -and $g33ErrJson.PSObject.Properties['error']
+    }
+
+    # G34: --decision-list --json returns {"decisions":[<obj>,...]}
+    $g34Out = & pwsh -NoProfile -File $skillPath --decision-list --json 2>&1 | Out-String
+    $g34Out = $g34Out.Trim()
+    $g34Json = $null
+    try { $g34Json = $g34Out | ConvertFrom-Json } catch {}
+    Check "G34a: --decision-list --json output is valid JSON" { $g34Json -ne $null }
+    Check "G34b: --decision-list --json is a single line" { -not ($g34Out.Contains([char]10) -or $g34Out.Contains([char]13)) }
+    Check "G34c: --decision-list --json has decisions array (may be empty)" {
+        $g34Json.PSObject.Properties['decisions'] -and $g34Json.decisions -is [array]
+    }
+    # G34d: record a decision and assert it round-trips through JSON
+    $g34Task = "g34-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    & pwsh -NoProfile -File $skillPath --decision-record --task $g34Task --gate g1 --severity HIGH --choice "G34 smoke approve" --reason "test" 2>&1 | Out-Null
+    $g34Out2 = & pwsh -NoProfile -File $skillPath --decision-list --json 2>&1 | Out-String
+    $g34Json2 = $null
+    try { $g34Json2 = $g34Out2.Trim() | ConvertFrom-Json } catch {}
+    $g34Found = $g34Json2.decisions | Where-Object { $_.task_id -eq $g34Task }
+    Check "G34d: --decision-list --json includes the just-recorded decision" {
+        $g34Found -ne $null -and $g34Found.choice -eq 'G34 smoke approve'
+    }
+
+    # G35: --plugins-list --json returns {"plugins":[<obj>,...],"total":N}
+    $g35Out = & pwsh -NoProfile -File $skillPath --plugins-list --json 2>&1 | Out-String
+    $g35Out = $g35Out.Trim()
+    $g35Json = $null
+    try { $g35Json = $g35Out | ConvertFrom-Json } catch {}
+    Check "G35a: --plugins-list --json output is valid JSON" { $g35Json -ne $null }
+    Check "G35b: --plugins-list --json is a single line" { -not ($g35Out.Contains([char]10) -or $g35Out.Contains([char]13)) }
+    Check "G35c: --plugins-list --json has plugins array + total" {
+        $g35Json.PSObject.Properties['plugins'] -and $g35Json.PSObject.Properties['total']
+    }
+    Check "G35d: --plugins-list --json plugin entries have name+version+source" {
+        $g35Json.plugins.Count -gt 0 -and
+        $g35Json.plugins[0].PSObject.Properties['name'] -and
+        $g35Json.plugins[0].PSObject.Properties['version'] -and
+        $g35Json.plugins[0].PSObject.Properties['source']
+    }
+    Check "G35e: --plugins-list --json total matches array length" {
+        $g35Json.total -eq $g35Json.plugins.Count
+    }
+
+    # G36: --team-config --json returns {"config":<obj|null>,"paths":{...}}
+    $g36Out = & pwsh -NoProfile -File $skillPath --team-config --json 2>&1 | Out-String
+    $g36Out = $g36Out.Trim()
+    $g36Json = $null
+    try { $g36Json = $g36Out | ConvertFrom-Json } catch {}
+    Check "G36a: --team-config --json output is valid JSON" { $g36Json -ne $null }
+    Check "G36b: --team-config --json is a single line" { -not ($g36Out.Contains([char]10) -or $g36Out.Contains([char]13)) }
+    Check "G36c: --team-config --json has config key (null when team mode is off)" {
+        $g36Json.PSObject.Properties['config']
+    }
+    Check "G36d: --team-config --json has paths sub-object with state_dir" {
+        $g36Json.PSObject.Properties['paths'] -and $g36Json.paths.PSObject.Properties['state_dir']
+    }
+
+    # G37: --stream-list --json returns {"streams":[...],"total":N,"in_progress":"<path>"}
+    $g37Out = & pwsh -NoProfile -File $skillPath --stream-list --json 2>&1 | Out-String
+    $g37Out = $g37Out.Trim()
+    $g37Json = $null
+    try { $g37Json = $g37Out | ConvertFrom-Json } catch {}
+    Check "G37a: --stream-list --json output is valid JSON" { $g37Json -ne $null }
+    Check "G37b: --stream-list --json is a single line" { -not ($g37Out.Contains([char]10) -or $g37Out.Contains([char]13)) }
+    Check "G37c: --stream-list --json has streams array + total" {
+        $g37Json.PSObject.Properties['streams'] -and $g37Json.PSObject.Properties['total']
+    }
+    Check "G37d: --stream-list --json has in_progress path" {
+        $g37Json.PSObject.Properties['in_progress'] -and ($g37Json.in_progress -match 'in_progress')
+    }
+
+    # -----------------------------------------------------------------------
     # Summary
     # -----------------------------------------------------------------------
     Write-Host ""

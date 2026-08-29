@@ -374,18 +374,27 @@ function Get-VortexPlugin {
     On conflict (same name in both) the user-scope plugin wins.
 .PARAMETER Name
     The name of a specific plugin. If omitted, lists all discovered plugins.
+.PARAMETER AsJson
+    (Added v0.3.10) Return the listing as a single-line JSON object per
+    docs/cli-json-contract.md instead of a table. Useful for piping
+    into ConvertFrom-Json / Where-Object. Has no effect when -Name
+    is set (the engine's --plugins-info already emits JSON).
 .EXAMPLE
     PS> Get-VortexPlugin                       # list all
     PS> Get-VortexPlugin -Name audio-foley    # dump audio-foley's manifest
+    PS> Get-VortexPlugin -AsJson | ConvertFrom-Json
 #>
     [CmdletBinding()]
     param(
-        [string] $Name
+        [string] $Name,
+        [switch] $AsJson
     )
     if ($Name) {
         Invoke-Skill -Arguments @('--plugins-info', $Name)
     } else {
-        Invoke-Skill -Arguments @('--plugins-list')
+        $args = @('--plugins-list')
+        if ($AsJson) { $args += '--json' }
+        Invoke-Skill -Arguments $args
     }
 }
 
@@ -401,12 +410,21 @@ function Get-VortexDecision {
 .DESCRIPTION
     Returns each decision as a row: task, gate, severity, choice, reason,
     timestamp. CRITICAL/HIGH decisions are highlighted.
+.PARAMETER AsJson
+    (Added v0.3.10) Return the history as a single-line
+    {"decisions":[<obj>,<obj>,...]} JSON object per docs/cli-json-contract.md.
+    Pipe into ConvertFrom-Json to get an array of decision objects.
 .EXAMPLE
     PS> Get-VortexDecision
+    PS> Get-VortexDecision -AsJson | ConvertFrom-Json
 #>
     [CmdletBinding()]
-    param()
-    Invoke-Skill -Arguments @('--decision-list')
+    param(
+        [switch] $AsJson
+    )
+    $args = @('--decision-list')
+    if ($AsJson) { $args += '--json' }
+    Invoke-Skill -Arguments $args
 }
 
 function Send-VortexDecision {
@@ -490,15 +508,23 @@ function Get-VortexProjectBudget {
 .PARAMETER Project
     The project slug (e.g. "trial_of_echoes"). Defaults to the current
     $env:VORTEX_PROJECT if set.
+.PARAMETER AsJson
+    (Added v0.3.10) Return as a single-line
+    {"project":..,"tokens_total":..,"usd_total":..,"so_far":{..},"percent_used":..}
+    JSON object per docs/cli-json-contract.md. In JSON mode, missing
+    -Project produces {"error":"..."} instead of a Usage message.
 .EXAMPLE
     PS> Get-VortexProjectBudget -Project my_project
+    PS> Get-VortexProjectBudget -Project my_project -AsJson | ConvertFrom-Json
 #>
     [CmdletBinding()]
     param(
-        [string] $Project = $env:VORTEX_PROJECT
+        [string] $Project = $env:VORTEX_PROJECT,
+        [switch] $AsJson
     )
     $args = @('--budget-show')
     if ($Project) { $args += @('--project', $Project) }
+    if ($AsJson)  { $args += '--json' }
     Invoke-Skill -Arguments $args
 }
 
@@ -605,12 +631,23 @@ function Get-VortexStream {
     state\<user>\in_progress\ when team_mode is on, or state\in_progress\
     otherwise. The output table includes a 'started' timestamp + the
     partials count, and a final 'in_progress: <path>' line.
+.PARAMETER AsJson
+    (Added v0.3.10) Return as a single-line
+    {"streams":[<obj>,...],"total":N,"in_progress":"<path>"}
+    JSON object per docs/cli-json-contract.md. The "in_progress"
+    key is the absolute path of the in-progress root so an
+    interactive streamer UI can locate the .partial files directly.
 .EXAMPLE
     PS> Get-VortexStream
+    PS> Get-VortexStream -AsJson | ConvertFrom-Json
 #>
     [CmdletBinding()]
-    param()
-    Invoke-Skill -Arguments @('--stream-list')
+    param(
+        [switch] $AsJson
+    )
+    $args = @('--stream-list')
+    if ($AsJson) { $args += '--json' }
+    Invoke-Skill -Arguments $args
 }
 
 function Send-VortexStreamHint {
@@ -644,12 +681,23 @@ function Get-VortexTeamConfig {
     v0.2.2: reads $VORTEX_HOME\.vortex\config.json and dumps it as JSON
     plus the resolved Paths. Useful for verifying that team_mode is
     on (or off) and that the per-user shards point at the right place.
+.PARAMETER AsJson
+    (Added v0.3.10) Return as a single-line
+    {"config":<obj-or-null>,"paths":{...}} JSON object per
+    docs/cli-json-contract.md. The "config" key is null when team
+    mode is off (no .vortex/config.json) so consumers can detect
+    this state without an empty object.
 .EXAMPLE
     PS> Get-VortexTeamConfig
+    PS> Get-VortexTeamConfig -AsJson | ConvertFrom-Json
 #>
     [CmdletBinding()]
-    param()
-    Invoke-Skill -Arguments @('--team-config')
+    param(
+        [switch] $AsJson
+    )
+    $args = @('--team-config')
+    if ($AsJson) { $args += '--json' }
+    Invoke-Skill -Arguments $args
 }
 
 function Invoke-VortexVectorHydrate {

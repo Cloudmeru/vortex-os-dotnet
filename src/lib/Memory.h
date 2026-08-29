@@ -61,5 +61,23 @@ namespace Vortex {
         //   2. most-recent project/<slug>.json (the prior episode / iteration)
         //   3. series/<series>.json (if detected)
         static String^ ReadForInjection(Paths^ p, String^ projectName);
+
+        // v0.3.10 (Phase 1, G32): same data as ReadForInjection, but
+        // returned as a single-line JSON object per the CLI JSON contract
+        // (docs/cli-json-contract.md). The output shape is:
+        //   {
+        //     "project": "<slug>",
+        //     "truncated": <bool>,
+        //     "chars": <int>,
+        //     "operator": <obj or null>,
+        //     "prior_projects": [<obj>, ...]   (zero or one entry),
+        //     "series": <obj or null>
+        //   }
+        // Each sub-object is the *parsed* JSON of the underlying derived
+        // artifact (operator.json, project/<slug>.json, series/<name>.json),
+        // not raw text. This lets consumers navigate the data without
+        // having to re-parse markdown. The text form (ReadForInjection)
+        // is unchanged and remains the source of truth for prompt injection.
+        static String^ ReadForInjectionJson(Paths^ p, String^ projectName);
     };
 }
