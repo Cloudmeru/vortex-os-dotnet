@@ -1295,7 +1295,15 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
                 forwarded->Add(a);
             }
         }
-        return Vortex::Skill::Run(args[0], forwarded->ToArray());
+        // v0.3.7: pass p->SkillDir, NOT args[0]. args[0] is the recipe
+        // name (e.g. "media-tutorial-video"), not a path. The pre-v0.3.7
+        // --recipe code passed args[0] anyway, but it didn't matter
+        // because the executor (CmdDispatchAgentRoster) didn't exist
+        // and nothing read agents/<name>.json. v0.3.7's executor reads
+        // agents from <SkillDir>/agents/, so the wrong SkillDir (the
+        // recipe name string) makes every agent_roster walk produce 0
+        // matches. Fix: pass the resolved skill dir.
+        return Vortex::Skill::Run(p->SkillDir, forwarded->ToArray());
     }
     if (cmd == "--package") {
         if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --package <swarm_id> [--dry-run]"); return 2; }
