@@ -1387,6 +1387,333 @@ Write-Output '===END==='
     }
 
     # -----------------------------------------------------------------------
+    # G38-G54: Phase 1.1 of the cross-OS CLI JSON contract (v0.3.11).
+    # Same contract as G32-G37: single line, valid JSON, documented shape.
+    # This batch covers the action verbs + inspector verbs that v0.3.10
+    # deferred. Each G-test block asserts:
+    #   - the output is valid JSON
+    #   - the output is a single line
+    #   - the documented top-level shape is present
+    #   - at least one error-path assertion (where applicable) so a
+    #     regression in the {error:..} shape fails fast
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "=== G38-G54: CLI JSON contract Phase 1.1 (v0.3.11) ===" -ForegroundColor Cyan
+
+    # G38: --cost-estimate --json returns {model, tokens_in, tokens_out, cost_usd}
+    $g38Out = & pwsh -NoProfile -File $skillPath --cost-estimate --model gpt-4o --tokens-in 1000 --tokens-out 500 --json 2>&1 | Out-String
+    $g38Out = $g38Out.Trim()
+    $g38Json = $null
+    try { $g38Json = $g38Out | ConvertFrom-Json } catch {}
+    Check "G38a: --cost-estimate --json output is valid JSON" { $g38Json -ne $null }
+    Check "G38b: --cost-estimate --json is a single line" { -not ($g38Out.Contains([char]10) -or $g38Out.Contains([char]13)) }
+    Check "G38c: --cost-estimate --json echoes model+tokens+cost" {
+        $g38Json.model -eq 'gpt-4o' -and
+        $g38Json.tokens_in -eq 1000 -and
+        $g38Json.tokens_out -eq 500 -and
+        $g38Json.PSObject.Properties['cost_usd']
+    }
+    # G38d: --cost-estimate without --model in JSON mode emits {error:..}
+    $g38ErrOut = & pwsh -NoProfile -File $skillPath --cost-estimate --json 2>&1 | Out-String
+    $g38ErrJson = $null
+    try { $g38ErrJson = $g38ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G38d: --cost-estimate --json without --model emits {error:..}" {
+        $g38ErrJson -and $g38ErrJson.PSObject.Properties['error']
+    }
+
+    # G39: --hitl-approve (no pending request -> {error:..}); success path
+    # requires a real pending_approvals/<task>.json, so we write a stub.
+    $g39Task = "g39-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    $g39StateDir = Join-Path $scratchHome "state\pending_approvals"
+    if (-not (Test-Path $g39StateDir)) { New-Item -ItemType Directory -Path $g39StateDir -Force | Out-Null }
+    $g39Body = '{"task_id":"' + $g39Task + '","status":"PENDING","severity":"HIGH","proposed_action":"ship it","timestamp":1700000000}'
+    Set-Content -LiteralPath (Join-Path $g39StateDir "$g39Task.json") -Value $g39Body -Encoding UTF8
+    $g39Out = & pwsh -NoProfile -File $skillPath --hitl-approve $g39Task --json 2>&1 | Out-String
+    $g39Out = $g39Out.Trim()
+    $g39Json = $null
+    try { $g39Json = $g39Out | ConvertFrom-Json } catch {}
+    Check "G39a: --hitl-approve --json output is valid JSON" { $g39Json -ne $null }
+    Check "G39b: --hitl-approve --json is a single line" { -not ($g39Out.Contains([char]10) -or $g39Out.Contains([char]13)) }
+    Check "G39c: --hitl-approve --json has task_id + status=APPROVED" {
+        $g39Json.task_id -eq $g39Task -and $g39Json.status -eq 'APPROVED'
+    }
+    Check "G39d: --hitl-approve --json for missing task emits {error:..}" {
+        $g39MissingOut = & pwsh -NoProfile -File $skillPath --hitl-approve "no-such-task-99" --json 2>&1 | Out-String
+        $g39MissingJson = $null
+        try { $g39MissingJson = $g39MissingOut.Trim() | ConvertFrom-Json } catch {}
+        $g39MissingJson -and $g39MissingJson.PSObject.Properties['error']
+    }
+
+    # G40: --hitl-deny
+    $g40Task = "g40-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    $g40Body = '{"task_id":"' + $g40Task + '","status":"PENDING","severity":"CRITICAL","proposed_action":"ship it","timestamp":1700000000}'
+    Set-Content -LiteralPath (Join-Path $g39StateDir "$g40Task.json") -Value $g40Body -Encoding UTF8
+    $g40Out = & pwsh -NoProfile -File $skillPath --hitl-deny $g40Task --json 2>&1 | Out-String
+    $g40Out = $g40Out.Trim()
+    $g40Json = $null
+    try { $g40Json = $g40Out | ConvertFrom-Json } catch {}
+    Check "G40a: --hitl-deny --json output is valid JSON" { $g40Json -ne $null }
+    Check "G40b: --hitl-deny --json has task_id + status=DENIED" {
+        $g40Json.task_id -eq $g40Task -and $g40Json.status -eq 'DENIED'
+    }
+
+    # G41: --hitl-status --json returns {pending:[{...}], total:N}
+    $g41Out = & pwsh -NoProfile -File $skillPath --hitl-status --json 2>&1 | Out-String
+    $g41Out = $g41Out.Trim()
+    $g41Json = $null
+    try { $g41Json = $g41Out | ConvertFrom-Json } catch {}
+    Check "G41a: --hitl-status --json output is valid JSON" { $g41Json -ne $null }
+    Check "G41b: --hitl-status --json is a single line" { -not ($g41Out.Contains([char]10) -or $g41Out.Contains([char]13)) }
+    Check "G41c: --hitl-status --json has pending array + total" {
+        $g41Json.PSObject.Properties['pending'] -and
+        $g41Json.PSObject.Properties['total'] -and
+        $g41Json.pending -is [array]
+    }
+    Check "G41d: --hitl-status --json total matches array length" {
+        $g41Json.total -eq $g41Json.pending.Count
+    }
+
+    # G42: --cost-record --json returns the recorded entry as a structured object
+    $g42Task = "g42-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    $g42Out = & pwsh -NoProfile -File $skillPath --cost-record --task $g42Task --agent g42-agent --model gpt-4o --tokens-in 1000 --tokens-out 500 --tags a,b --json 2>&1 | Out-String
+    $g42Out = $g42Out.Trim()
+    $g42Json = $null
+    try { $g42Json = $g42Out | ConvertFrom-Json } catch {}
+    Check "G42a: --cost-record --json output is valid JSON" { $g42Json -ne $null }
+    Check "G42b: --cost-record --json is a single line" { -not ($g42Out.Contains([char]10) -or $g42Out.Contains([char]13)) }
+    Check "G42c: --cost-record --json echoes task+agent+model+tokens" {
+        $g42Json.task_id -eq $g42Task -and
+        $g42Json.agent -eq 'g42-agent' -and
+        $g42Json.model -eq 'gpt-4o' -and
+        $g42Json.tokens_in -eq 1000 -and
+        $g42Json.tokens_out -eq 500
+    }
+    Check "G42d: --cost-record --json has tags array" {
+        $g42Json.PSObject.Properties['tags'] -and
+        $g42Json.tags -is [array] -and
+        $g42Json.tags.Count -eq 2 -and
+        $g42Json.tags[0] -eq 'a' -and
+        $g42Json.tags[1] -eq 'b'
+    }
+    Check "G42e: --cost-record --json has cost_usd" { $g42Json.PSObject.Properties['cost_usd'] }
+    # G42f: missing required flags -> {error:..}
+    $g42ErrOut = & pwsh -NoProfile -File $skillPath --cost-record --task foo --json 2>&1 | Out-String
+    $g42ErrJson = $null
+    try { $g42ErrJson = $g42ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G42f: --cost-record --json missing flags emits {error:..}" {
+        $g42ErrJson -and $g42ErrJson.PSObject.Properties['error']
+    }
+
+    # G43: --budget-set --json returns the persisted budget as a structured object
+    $g43Proj = "g43-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    $g43Out = & pwsh -NoProfile -File $skillPath --budget-set --project $g43Proj --tokens-total 100000 --usd-total 2.5 --json 2>&1 | Out-String
+    $g43Out = $g43Out.Trim()
+    $g43Json = $null
+    try { $g43Json = $g43Out | ConvertFrom-Json } catch {}
+    Check "G43a: --budget-set --json output is valid JSON" { $g43Json -ne $null }
+    Check "G43b: --budget-set --json is a single line" { -not ($g43Out.Contains([char]10) -or $g43Out.Contains([char]13)) }
+    Check "G43c: --budget-set --json echoes project+tokens_total+usd_total" {
+        $g43Json.project -eq $g43Proj -and
+        $g43Json.tokens_total -eq 100000 -and
+        $g43Json.PSObject.Properties['usd_total']
+    }
+    # G43d: --budget-set with no --project in JSON mode -> {error:..}
+    $g43ErrOut = & pwsh -NoProfile -File $skillPath --budget-set --json 2>&1 | Out-String
+    $g43ErrJson = $null
+    try { $g43ErrJson = $g43ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G43d: --budget-set --json without --project emits {error:..}" {
+        $g43ErrJson -and $g43ErrJson.PSObject.Properties['error']
+    }
+
+    # G44: --plugin-install --json (use a deliberately bad URL so we get the
+    # error path without needing real network access; the test of the
+    # success path requires a real GitHub URL and is skipped in this
+    # offline test env).
+    $g44ErrOut = & pwsh -NoProfile -File $skillPath --plugin-install "not-a-url" --json 2>&1 | Out-String
+    $g44ErrJson = $null
+    try { $g44ErrJson = $g44ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G44a: --plugin-install --json with bad URL emits {error:..}" {
+        $g44ErrJson -and $g44ErrJson.PSObject.Properties['error']
+    }
+    Check "G44b: --plugin-install --json error is a single line" { -not ($g44ErrOut.Trim().Contains([char]10) -or $g44ErrOut.Trim().Contains([char]13)) }
+
+    # G45: --plugin-remove --json (no user-scope plugin named X -> {error:..})
+    $g45ErrOut = & pwsh -NoProfile -File $skillPath --plugin-remove "no-such-plugin-99" --json 2>&1 | Out-String
+    $g45ErrJson = $null
+    try { $g45ErrJson = $g45ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G45a: --plugin-remove --json for missing plugin emits {error:..}" {
+        $g45ErrJson -and $g45ErrJson.PSObject.Properties['error']
+    }
+
+    # G46: --decision-record --json returns the recorded decision as a structured object
+    $g46Task = "g46-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    $g46Out = & pwsh -NoProfile -File $skillPath --decision-record --task $g46Task --gate g1 --severity HIGH --choice "G46 approve" --reason "smoke" --json 2>&1 | Out-String
+    $g46Out = $g46Out.Trim()
+    $g46Json = $null
+    try { $g46Json = $g46Out | ConvertFrom-Json } catch {}
+    Check "G46a: --decision-record --json output is valid JSON" { $g46Json -ne $null }
+    Check "G46b: --decision-record --json is a single line" { -not ($g46Out.Contains([char]10) -or $g46Out.Contains([char]13)) }
+    Check "G46c: --decision-record --json has task+gate+severity+choice+reason+index" {
+        $g46Json.task_id -eq $g46Task -and
+        $g46Json.gate -eq 'g1' -and
+        $g46Json.severity -eq 'HIGH' -and
+        $g46Json.choice -eq 'G46 approve' -and
+        $g46Json.PSObject.Properties['index']
+    }
+    # G46d: --decision-record missing required flags -> {error:..}
+    $g46ErrOut = & pwsh -NoProfile -File $skillPath --decision-record --json 2>&1 | Out-String
+    $g46ErrJson = $null
+    try { $g46ErrJson = $g46ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G46d: --decision-record --json missing flags emits {error:..}" {
+        $g46ErrJson -and $g46ErrJson.PSObject.Properties['error']
+    }
+
+    # G47: --agents-inspect --json returns the manifest as a single-line JSON object
+    $g47Out = & pwsh -NoProfile -File $skillPath --agents-inspect supervisor.store --json 2>&1 | Out-String
+    $g47Out = $g47Out.Trim()
+    $g47Json = $null
+    try { $g47Json = $g47Out | ConvertFrom-Json } catch {}
+    Check "G47a: --agents-inspect --json output is valid JSON" { $g47Json -ne $null }
+    Check "G47b: --agents-inspect --json is a single line" { -not ($g47Out.Contains([char]10) -or $g47Out.Contains([char]13)) }
+    Check "G47c: --agents-inspect --json echoes manifest fields" {
+        $g47Json.name -eq 'supervisor.store' -and
+        $g47Json.PSObject.Properties['version'] -and
+        $g47Json.PSObject.Properties['kind']
+    }
+    # G47d: --agents-inspect for unknown name -> {error:..}
+    $g47ErrOut = & pwsh -NoProfile -File $skillPath --agents-inspect no-such-agent-99 --json 2>&1 | Out-String
+    $g47ErrJson = $null
+    try { $g47ErrJson = $g47ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G47d: --agents-inspect --json for missing agent emits {error:..}" {
+        $g47ErrJson -and $g47ErrJson.PSObject.Properties['error']
+    }
+
+    # G48: --agents-validate --json returns {file, ok, missing[], reason}
+    $g48ValidFile = Join-Path $skillRoot 'agents\supervisor.store.json'
+    $g48Out = & pwsh -NoProfile -File $skillPath --agents-validate $g48ValidFile --json 2>&1 | Out-String
+    $g48Out = $g48Out.Trim()
+    $g48Json = $null
+    try { $g48Json = $g48Out | ConvertFrom-Json } catch {}
+    Check "G48a: --agents-validate --json output is valid JSON" { $g48Json -ne $null }
+    Check "G48b: --agents-validate --json is a single line" { -not ($g48Out.Contains([char]10) -or $g48Out.Contains([char]13)) }
+    Check "G48c: --agents-validate --json has file+ok+missing+reason" {
+        $g48Json.PSObject.Properties['file'] -and
+        $g48Json.PSObject.Properties['ok'] -and
+        $g48Json.PSObject.Properties['missing'] -and
+        $g48Json.PSObject.Properties['reason']
+    }
+    Check "G48d: --agents-validate --json for valid manifest reports ok=true" { $g48Json.ok -eq $true }
+    Check "G48e: --agents-validate --json for missing file emits {error:..}" {
+        $g48ErrOut = & pwsh -NoProfile -File $skillPath --agents-validate "C:\nope\no-such-file.json" --json 2>&1 | Out-String
+        $g48ErrJson = $null
+        try { $g48ErrJson = $g48ErrOut.Trim() | ConvertFrom-Json } catch {}
+        $g48ErrJson -and $g48ErrJson.PSObject.Properties['error']
+    }
+
+    # G49: --agents-lint --json returns {results:[{file, ok, reason}], pass, fail}
+    $g49Out = & pwsh -NoProfile -File $skillPath --agents-lint --all --json 2>&1 | Out-String
+    $g49Out = $g49Out.Trim()
+    $g49Json = $null
+    try { $g49Json = $g49Out | ConvertFrom-Json } catch {}
+    Check "G49a: --agents-lint --json output is valid JSON" { $g49Json -ne $null }
+    Check "G49b: --agents-lint --json is a single line" { -not ($g49Out.Contains([char]10) -or $g49Out.Contains([char]13)) }
+    Check "G49c: --agents-lint --json has results+pass+fail" {
+        $g49Json.PSObject.Properties['results'] -and
+        $g49Json.PSObject.Properties['pass'] -and
+        $g49Json.PSObject.Properties['fail']
+    }
+    Check "G49d: --agents-lint --json results have file+ok fields" {
+        $g49Json.results.Count -gt 0 -and
+        $g49Json.results[0].PSObject.Properties['file'] -and
+        $g49Json.results[0].PSObject.Properties['ok']
+    }
+    Check "G49e: --agents-lint --json pass+fail matches results count" {
+        ($g49Json.pass + $g49Json.fail) -eq $g49Json.results.Count
+    }
+
+    # G50: --agents-trace --json returns {run_id, entries:[...], total}
+    $g50Out = & pwsh -NoProfile -File $skillPath --agents-trace "no-such-trace-99" --json 2>&1 | Out-String
+    $g50Out = $g50Out.Trim()
+    $g50Json = $null
+    try { $g50Json = $g50Out | ConvertFrom-Json } catch {}
+    Check "G50a: --agents-trace --json output is valid JSON" { $g50Json -ne $null }
+    Check "G50b: --agents-trace --json is a single line" { -not ($g50Out.Contains([char]10) -or $g50Out.Contains([char]13)) }
+    Check "G50c: --agents-trace --json has run_id+entries+total" {
+        $g50Json.run_id -eq 'no-such-trace-99' -and
+        $g50Json.PSObject.Properties['entries'] -and
+        $g50Json.total -eq 0
+    }
+    # G50d: --agents-trace with no run_id -> {error:..}
+    $g50ErrOut = & pwsh -NoProfile -File $skillPath --agents-trace --json 2>&1 | Out-String
+    $g50ErrJson = $null
+    try { $g50ErrJson = $g50ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G50d: --agents-trace --json without run_id emits {error:..}" {
+        $g50ErrJson -and $g50ErrJson.PSObject.Properties['error']
+    }
+
+    # G51: --agents-graph --json returns {format, nodes[], total}
+    $g51Out = & pwsh -NoProfile -File $skillPath --agents-graph --format ascii --json 2>&1 | Out-String
+    $g51Out = $g51Out.Trim()
+    $g51Json = $null
+    try { $g51Json = $g51Out | ConvertFrom-Json } catch {}
+    Check "G51a: --agents-graph --json output is valid JSON" { $g51Json -ne $null }
+    Check "G51b: --agents-graph --json is a single line" { -not ($g51Out.Contains([char]10) -or $g51Out.Contains([char]13)) }
+    Check "G51c: --agents-graph --json has format+nodes+total" {
+        $g51Json.format -eq 'ascii' -and
+        $g51Json.PSObject.Properties['nodes'] -and
+        $g51Json.PSObject.Properties['total'] -and
+        $g51Json.nodes -is [array]
+    }
+
+    # G52: --agents-factory-diff --json returns {name, version, kind, capabilities[]}
+    $g52Out = & pwsh -NoProfile -File $skillPath --agents-factory-diff supervisor.store --json 2>&1 | Out-String
+    $g52Out = $g52Out.Trim()
+    $g52Json = $null
+    try { $g52Json = $g52Out | ConvertFrom-Json } catch {}
+    Check "G52a: --agents-factory-diff --json output is valid JSON" { $g52Json -ne $null }
+    Check "G52b: --agents-factory-diff --json is a single line" { -not ($g52Out.Contains([char]10) -or $g52Out.Contains([char]13)) }
+    Check "G52c: --agents-factory-diff --json has name+version+kind+capabilities" {
+        $g52Json.name -eq 'supervisor.store' -and
+        $g52Json.PSObject.Properties['version'] -and
+        $g52Json.PSObject.Properties['kind'] -and
+        $g52Json.PSObject.Properties['capabilities']
+    }
+    # G52d: --agents-factory-diff for unknown name -> {error:..}
+    $g52ErrOut = & pwsh -NoProfile -File $skillPath --agents-factory-diff no-such-agent-99 --json 2>&1 | Out-String
+    $g52ErrJson = $null
+    try { $g52ErrJson = $g52ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G52d: --agents-factory-diff --json for missing agent emits {error:..}" {
+        $g52ErrJson -and $g52ErrJson.PSObject.Properties['error']
+    }
+
+    # G53: --inspector-check --json returns {task_id, return_code, verdict, ...}
+    $g53Out = & pwsh -NoProfile -File $skillPath --inspector-check no-such-task-99 --json 2>&1 | Out-String
+    $g53Out = $g53Out.Trim()
+    $g53Json = $null
+    try { $g53Json = $g53Out | ConvertFrom-Json } catch {}
+    Check "G53a: --inspector-check --json output is valid JSON" { $g53Json -ne $null }
+    Check "G53b: --inspector-check --json is a single line" { -not ($g53Out.Contains([char]10) -or $g53Out.Contains([char]13)) }
+    Check "G53c: --inspector-check --json has task_id+return_code+verdict" {
+        $g53Json.task_id -eq 'no-such-task-99' -and
+        $g53Json.PSObject.Properties['return_code'] -and
+        $g53Json.PSObject.Properties['verdict']
+    }
+
+    # G54: --audit-trail --json returns {entries[], total, log, truncated}
+    $g54Out = & pwsh -NoProfile -File $skillPath --audit-trail --json 2>&1 | Out-String
+    $g54Out = $g54Out.Trim()
+    $g54Json = $null
+    try { $g54Json = $g54Out | ConvertFrom-Json } catch {}
+    Check "G54a: --audit-trail --json output is valid JSON" { $g54Json -ne $null }
+    Check "G54b: --audit-trail --json is a single line" { -not ($g54Out.Contains([char]10) -or $g54Out.Contains([char]13)) }
+    Check "G54c: --audit-trail --json has entries+total+log+truncated" {
+        $g54Json.PSObject.Properties['entries'] -and
+        $g54Json.PSObject.Properties['total'] -and
+        $g54Json.PSObject.Properties['log'] -and
+        $g54Json.PSObject.Properties['truncated']
+    }
+
+    # -----------------------------------------------------------------------
     # Summary
     # -----------------------------------------------------------------------
     Write-Host ""

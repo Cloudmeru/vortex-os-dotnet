@@ -157,20 +157,44 @@ function Get-VortexAuditTrail {
 <#
 .SYNOPSIS
     Print the last 50 entries of the VORTEX-OS audit log (memory\audit.jsonl).
+.PARAMETER AsJson
+    (Added v0.3.11) Return as a single-line
+    {"entries":[<obj>,...],"total":N,"log":"<path>","truncated":bool}
+    JSON object per docs/cli-json-contract.md. Each entry is the parsed
+    JSON of the matching audit.jsonl line. Capped at 1000 entries; the
+    "truncated" key tells the consumer.
+.EXAMPLE
+    PS> Get-VortexAuditTrail
+    PS> Get-VortexAuditTrail -AsJson | ConvertFrom-Json
 #>
     [CmdletBinding()]
-    param()
-    Invoke-Skill -Arguments @('--audit-trail')
+    param(
+        [switch] $AsJson
+    )
+    $args = @('--audit-trail')
+    if ($AsJson) { $args += '--json' }
+    Invoke-Skill -Arguments $args
 }
 
 function Get-VortexHitlPending {
 <#
 .SYNOPSIS
     List pending Human-in-the-Loop approval requests.
+.PARAMETER AsJson
+    (Added v0.3.11) Return as a single-line
+    {"pending":[{"task_id","status","severity","proposed_action"}],"total":N}
+    JSON object per docs/cli-json-contract.md.
+.EXAMPLE
+    PS> Get-VortexHitlPending
+    PS> Get-VortexHitlPending -AsJson | ConvertFrom-Json
 #>
     [CmdletBinding()]
-    param()
-    Invoke-Skill -Arguments @('--hitl-status')
+    param(
+        [switch] $AsJson
+    )
+    $args = @('--hitl-status')
+    if ($AsJson) { $args += '--json' }
+    Invoke-Skill -Arguments $args
 }
 
 function Approve-VortexHitl {
@@ -179,15 +203,23 @@ function Approve-VortexHitl {
     Approve a pending HITL request, releasing the VORTEX-OS gate.
 .PARAMETER TaskId
     The task_id that was printed in the PENDING_HUMAN halt message.
+.PARAMETER AsJson
+    (Added v0.3.11) Return the persisted checkpoint as a single-line JSON
+    object per docs/cli-json-contract.md. If the task is not pending,
+    emits {"error":"No pending HITL request for: <id>"}.
 .EXAMPLE
     PS> Approve-VortexHitl -TaskId package_websim
+    PS> Approve-VortexHitl -TaskId package_websim -AsJson | ConvertFrom-Json
 #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory, Position = 0)]
-        [string] $TaskId
+        [string] $TaskId,
+        [switch] $AsJson
     )
-    Invoke-Skill -Arguments @('--hitl-approve', $TaskId)
+    $args = @('--hitl-approve', $TaskId)
+    if ($AsJson) { $args += '--json' }
+    Invoke-Skill -Arguments $args
 }
 
 function Deny-VortexHitl {
@@ -196,13 +228,19 @@ function Deny-VortexHitl {
     Deny a pending HITL request, aborting the VORTEX-OS gate.
 .PARAMETER TaskId
     The task_id that was printed in the PENDING_HUMAN halt message.
+.PARAMETER AsJson
+    (Added v0.3.11) Return the persisted checkpoint as a single-line JSON
+    object per docs/cli-json-contract.md.
 #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory, Position = 0)]
-        [string] $TaskId
+        [string] $TaskId,
+        [switch] $AsJson
     )
-    Invoke-Skill -Arguments @('--hitl-deny', $TaskId)
+    $args = @('--hitl-deny', $TaskId)
+    if ($AsJson) { $args += '--json' }
+    Invoke-Skill -Arguments $args
 }
 
 function Test-VortexPackage {
@@ -448,8 +486,13 @@ function Send-VortexDecision {
     LOW / MEDIUM / HIGH / CRITICAL. Default: HIGH.
 .PARAMETER Episode
     Optional episode number for episodic projects.
+.PARAMETER AsJson
+    (Added v0.3.11) Return the recorded decision as a single-line JSON
+    object per docs/cli-json-contract.md. Includes the new "index" key
+    (the new total count of decisions).
 .EXAMPLE
     PS> Send-VortexDecision -Task ep1 -Gate g1 -Severity HIGH -Choice "approve script" -Reason "looks good" -Episode 1
+    PS> Send-VortexDecision -Task ep1 -Gate g1 -Choice "approve" -AsJson | ConvertFrom-Json
 #>
     [CmdletBinding()]
     param(
@@ -458,11 +501,13 @@ function Send-VortexDecision {
         [Parameter(Mandatory)] [string] $Choice,
         [string] $Reason = '',
         [ValidateSet('LOW', 'MEDIUM', 'HIGH', 'CRITICAL')] [string] $Severity = 'HIGH',
-        [int] $Episode = 0
+        [int] $Episode = 0,
+        [switch] $AsJson
     )
     $args = @('--decision-record', '--task', $Task, '--gate', $Gate,
               '--severity', $Severity, '--choice', $Choice, '--reason', $Reason)
     if ($Episode -gt 0) { $args += @('--episode', $Episode) }
+    if ($AsJson) { $args += '--json' }
     Invoke-Skill -Arguments $args
 }
 
@@ -549,11 +594,13 @@ function Set-VortexProjectBudget {
     param(
         [Parameter(Mandatory)] [string] $Project,
         [long]   $TokensTotal = 0,
-        [double] $UsdTotal    = 0
+        [double] $UsdTotal    = 0,
+        [switch] $AsJson
     )
     $args = @('--budget-set', '--project', $Project)
     if ($TokensTotal -gt 0) { $args += @('--tokens-total', $TokensTotal) }
     if ($UsdTotal    -gt 0) { $args += @('--usd-total',    $UsdTotal) }
+    if ($AsJson) { $args += '--json' }
     Invoke-Skill -Arguments $args
 }
 
@@ -564,15 +611,26 @@ function Get-VortexAgentGraph {
 .PARAMETER Format
     ascii (default) or mermaid. The mermaid format is suitable for
     pasting into a Markdown document.
+.PARAMETER AsJson
+    (Added v0.3.11) Return as a single-line
+    {"format":..,"nodes":["supervisor.store",...],"total":N}
+    JSON object per docs/cli-json-contract.md. The "format" key
+    echoes the requested format (informational); JSON mode always
+    returns the node list so a downstream tool can render in any
+    format.
 .EXAMPLE
     PS> Get-VortexAgentGraph
     PS> Get-VortexAgentGraph -Format mermaid
+    PS> Get-VortexAgentGraph -AsJson | ConvertFrom-Json
 #>
     [CmdletBinding()]
     param(
-        [ValidateSet('ascii', 'mermaid')] [string] $Format = 'ascii'
+        [ValidateSet('ascii', 'mermaid')] [string] $Format = 'ascii',
+        [switch] $AsJson
     )
-    Invoke-Skill -Arguments @('--agents-graph', '--format', $Format)
+    $args = @('--agents-graph', '--format', $Format)
+    if ($AsJson) { $args += '--json' }
+    Invoke-Skill -Arguments $args
 }
 
 function Test-VortexAgent {
@@ -581,16 +639,29 @@ function Test-VortexAgent {
     Lint one or all agents. Returns $true if all pass, $false otherwise.
 .PARAMETER Name
     The agent name. If omitted, lints all agents.
+.PARAMETER AsJson
+    (Added v0.3.11) Return as a single-line
+    {"results":[{"file","ok","reason"}],"pass":N,"fail":N}
+    JSON object per docs/cli-json-contract.md. The return value
+    becomes the parsed object (so the caller can inspect
+    .pass / .fail directly) instead of a bool.
 .EXAMPLE
     PS> Test-VortexAgent
     PS> Test-VortexAgent -Name supervisor.store
+    PS> Test-VortexAgent -AsJson | ConvertFrom-Json
 #>
     [CmdletBinding()]
     param(
-        [string] $Name
+        [string] $Name,
+        [switch] $AsJson
     )
     $target = if ($Name) { $Name } else { '--all' }
-    $lint = Invoke-Skill -Arguments @('--agents-lint', $target)
+    $args = @('--agents-lint', $target)
+    if ($AsJson) { $args += '--json' }
+    $lint = Invoke-Skill -Arguments $args
+    if ($AsJson) {
+        try { return ($lint | ConvertFrom-Json) } catch { return $null }
+    }
     return ($lint -match 'LINT_OK') -and ($lint -notmatch 'LINT_FAIL')
 }
 

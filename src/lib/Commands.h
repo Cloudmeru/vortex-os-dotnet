@@ -32,22 +32,46 @@ namespace Vortex {
         // Lint all agents or a single one. Mirrors cmd_agents_lint.
         // Prints "LINT_OK: <file>" / "LINT_FAIL: <file> ...". Returns 0 if
         // everything passed, 1 if any failed.
-        static int AgentsLint(Paths^ p, String^ target);
+        // v0.3.11 (Phase 1.1, G49): --json mode emits a single-line
+        //   {"results":[{"file","ok","reason"}],"pass":N,"fail":N}
+        // per docs/cli-json-contract.md.
+        static int AgentsLint(Paths^ p, String^ target, bool asJson);
 
         // Prints the agent graph (simple name list). Mirrors cmd_agents_graph.
-        static int AgentsGraph(Paths^ p, String^ format);
+        // v0.3.11 (Phase 1.1, G51): --json mode emits
+        //   {"nodes":["supervisor.store",...]} per docs/cli-json-contract.md.
+        // The "format" argument is currently only meaningful in text mode
+        // (ascii / mermaid); JSON mode ignores it and returns the node list
+        // so a downstream tool can render in any format.
+        static int AgentsGraph(Paths^ p, String^ format, bool asJson);
 
         // Dump a single agent manifest. Mirrors cmd_agents_inspect.
-        static int AgentsInspect(Paths^ p, String^ name);
+        // v0.3.11 (Phase 1.1, G47): --json mode emits the manifest's
+        // JSON contents as a single-line object (the file is already JSON;
+        // we just emit GetRawText so the schema is exactly the manifest).
+        // In text mode the file is dumped as-is (also JSON, pretty-printed
+        // by the author's editor).
+        static int AgentsInspect(Paths^ p, String^ name, bool asJson);
 
         // Validate an external manifest. Mirrors cmd_agents_validate.
-        static int AgentsValidate(String^ file);
+        // v0.3.11 (Phase 1.1, G48): --json mode emits
+        //   {"file","ok":bool,"missing":[],"reason"}
+        // per docs/cli-json-contract.md. The "missing" array is the
+        // list of required fields that were absent (empty when ok=true).
+        static int AgentsValidate(String^ file, bool asJson);
 
         // Trace a run_id in memory/audit.jsonl. Mirrors cmd_agents_trace.
-        static int AgentsTrace(Paths^ p, String^ runId);
+        // v0.3.11 (Phase 1.1, G50): --json mode emits
+        //   {"run_id","entries":[{ts,tier,agent,action,status,...}],"total":N}
+        // per docs/cli-json-contract.md. Each entry is the parsed JSON of
+        // the matching audit.jsonl line.
+        static int AgentsTrace(Paths^ p, String^ runId, bool asJson);
 
         // One-line summary of an agent. Mirrors cmd_agents_factory_diff.
-        static int AgentsFactoryDiff(Paths^ p, String^ name);
+        // v0.3.11 (Phase 1.1, G52): --json mode emits
+        //   {"name","version","kind","capabilities":[]}
+        // per docs/cli-json-contract.md.
+        static int AgentsFactoryDiff(Paths^ p, String^ name, bool asJson);
 
         // -----------------------------------------------------------------
         // Worker commands

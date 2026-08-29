@@ -134,6 +134,25 @@ changelog.
 | `--plugins-list --json` (0.3.10) | object | `plugins[]` with `name,version,capability,source`, `total` |
 | `--team-config --json` (0.3.10) | object | `config{...}` or `null`, `paths{...}` |
 | `--stream-list --json` (0.3.10) | object | `streams[]` with `task_id,started_at,partials`, `total`, `in_progress` |
+| `--cost-estimate --json` (0.3.11) | object | `model`, `tokens_in`, `tokens_out`, `cost_usd` |
+| `--hitl-approve --json` (0.3.11) | object | the persisted checkpoint (verbatim) |
+| `--hitl-deny --json` (0.3.11) | object | the persisted checkpoint (verbatim) |
+| `--hitl-status --json` (0.3.11) | object | `pending[{task_id,status,severity,proposed_action}]`, `total` |
+| `--cost-record --json` (0.3.11) | object | `task_id`, `agent`, `project`, `model`, `tokens_in/out`, `duration_ms`, `cost_usd`, `tags[]` |
+| `--budget-set --json` (0.3.11) | object | `project`, `tokens_total`, `usd_total` |
+| `--plugin-install --json` (0.3.11) | object | `plugin`, `path`, `tarball_url`, `size_bytes`, `entry` |
+| `--plugin-remove --json` (0.3.11) | object | `plugin`, `path` |
+| `--decision-record --json` (0.3.11) | object | `task_id`, `gate`, `severity`, `choice`, `reason`, `episode_number`, `index` |
+| `--agents-inspect --json` (0.3.11) | object | the manifest (verbatim) |
+| `--agents-validate --json` (0.3.11) | object | `file`, `ok`, `missing[]`, `reason` |
+| `--agents-lint --json` (0.3.11) | object | `results[{file,ok,reason}]`, `pass`, `fail` |
+| `--agents-trace --json` (0.3.11) | object | `run_id`, `entries[]`, `total`, `log` |
+| `--agents-graph --json` (0.3.11) | object | `format`, `nodes[]`, `total` |
+| `--agents-factory-diff --json` (0.3.11) | object | `name`, `version`, `kind`, `capabilities[]` |
+| `--inspector-check --json` (0.3.11) | object | `task_id`, `return_code`, `verdict`, `findings_count`, `invariants` |
+| `--audit-trail --json` (0.3.11) | object | `entries[]`, `total`, `log`, `truncated` (capped at 1000) |
+| `--agents-discover --json` | **array** of agent objects | `name`, `version`, `kind`, `capabilities[]` |
+| `--cost-report --json` | object | `since_unix`, `grand_total{dispatches,tokens,cost_usd}`, `projects[]` |
 | ... | ... | (more verbs in subsequent minor versions) |
 
 A consumer should never have to know the engine's C++ internals to

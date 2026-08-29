@@ -4,6 +4,113 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.11] — 2026-08-29
+
+### Added — Phase 1.1 of the cross-OS CLI JSON contract (17 more verbs)
+
+v0.3.10 introduced the contract and shipped 6 read-only verbs behind
+`--json`. v0.3.11 lands 17 more, covering every data-emitting verb
+that's a natural fit for the same shape. Streaming verbs (`--stream`,
+`--stream-stop`, `--stream-finalize`, `--hint`) stay deferred --
+they need a separate event-stream contract (planned 0.3.12).
+
+### Action verbs (8) -- success: structured object; failure: `{error:..}`
+
+| Verb | Success shape |
+|---|---|
+| `--cost-estimate --model X --tokens-in N --tokens-out N --json` (G38) | `{model,tokens_in,tokens_out,cost_usd}` |
+| `--hitl-approve <task> --json` (G39) | the persisted checkpoint as a single-line object |
+| `--hitl-deny <task> --json` (G40) | the persisted checkpoint as a single-line object |
+| `--hitl-status --json` (G41) | `{pending:[{task_id,status,severity,proposed_action}],total}` |
+| `--cost-record --task T --agent A --model M --tokens-in N --tokens-out N --json` (G42) | `{task_id,agent,project,model,tokens_in,tokens_out,duration_ms,cost_usd,tags[]}` |
+| `--budget-set --project P --tokens-total N --usd-total N --json` (G43) | `{project,tokens_total,usd_total}` |
+| `--plugin-install <url> --json` (G44) | `{plugin,path,tarball_url,size_bytes,entry}` |
+| `--plugin-remove <name> --json` (G45) | `{plugin,path}` |
+| `--decision-record --task T --gate G --choice C --json` (G46) | `{task_id,gate,severity,choice,reason,episode_number,index}` |
+
+### Inspector / reader verbs (8) -- structured object on success; error envelope on miss
+
+| Verb | Shape |
+|---|---|
+| `--agents-inspect <name> --json` (G47) | the manifest as a single-line object (verbatim) |
+| `--agents-validate <file> --json` (G48) | `{file,ok,missing[],reason}` |
+| `--agents-lint [--all] --json` (G49) | `{results:[{file,ok,reason}],pass,fail}` |
+| `--agents-trace <run_id> --json` (G50) | `{run_id,entries:[<obj>],total,log}` |
+| `--agents-graph [--format] --json` (G51) | `{format,nodes[],total}` |
+| `--agents-factory-diff <name> --json` (G52) | `{name,version,kind,capabilities[]}` |
+| `--inspector-check <task_id> --json` (G53) | `{task_id,return_code,verdict,findings_count,invariants}` |
+| `--audit-trail --json` (G54) | `{entries:[<obj>],total,log,truncated}` (capped at 1000 entries) |
+
+### PowerShell shim (Vortex.psm1)
+
+7 more cmdlets gain `-AsJson`:
+
+```powershell
+PS> Approve-VortexHitl -TaskId ep2_smoke -AsJson | ConvertFrom-Json
+PS> Deny-VortexHitl   -TaskId ep2_smoke -AsJson | ConvertFrom-Json
+PS> Get-VortexHitlPending -AsJson
+PS> Send-VortexDecision -Task ep1 -Gate g1 -Choice approve -AsJson
+PS> Set-VortexProjectBudget -Project trial -UsdTotal 5.0 -AsJson
+PS> Get-VortexAgentGraph -AsJson
+PS> Test-VortexAgent -AsJson
+PS> Get-VortexAuditTrail -AsJson
+```
+
+`Test-VortexAgent -AsJson` returns the parsed JSON object (with
+`.pass`/`.fail` keys) instead of a bool; callers that want the bool
+shape can check `.fail -eq 0`.
+
+### Tests
+
+`tests/test_engine.ps1` G38-G54 (17 new sub-sections, 70+ new
+assertions). Same shape as G32-G37: `ConvertFrom-Json` round-trip,
+single-line check, top-level type check, documented field check,
+and a `{error:..}` envelope check for each verb's failure path
+(where applicable).
+
+### Fixed
+
+1. **Duplicate `--cost-estimate` dispatch block.** The pre-v0.3.11
+   `Dispatch()` had two identical `if (cmd == "--cost-estimate")`
+   branches back-to-back. The first matched; the second was dead.
+   Collapsed to a single handler. Found while auditing for
+   the `--json` additions.
+
+2. **Off-by-one in `--cost-record` / `--budget-set` argv parsing.**
+   The pre-v0.3.11 handlers used `i < args->Length - 1` as the
+   loop bound AND didn't increment `i` after consuming the value,
+   so a trailing flag (e.g. `--tags foo` as the final arg) was
+   dropped. This bit `--cost-record --tags a,b` whenever `b` was
+   the trailing token. Fixed in the new dispatch handlers.
+
+3. **Off-by-one in `--decision-record` argv parsing.** Same shape:
+   `--reason` / `--severity` / `--episode` didn't advance `i` after
+   consuming the value, so a multi-flag invocation could mis-parse
+   the trailing token. Fixed.
+
+4. **`--agents-factory-diff` had no `Dispatch()` entry.** The C++
+   function `Commands::AgentsFactoryDiff` was defined in
+   `lib/Commands.h/cpp` and exported, but no `if (cmd == "--...")`
+   line in `Dispatch()` reached it -- the verb was effectively
+   `--help` no matter what the user typed. Wired up in this
+   batch (G52).
+
+5. **`Get-VortexMemory` was *not* refactored.** Earlier mapping
+   flagged it as duplicating engine logic; the deeper check showed
+   it reads a *different* data set (per-project fingerprints in
+   `memory/derived/`, not the prior-context slice that
+   `--memory-show` assembles). Left as-is.
+
+### Not yet in this release
+
+- Streaming verbs (`--stream`, `--stream-stop`, `--stream-finalize`,
+  `--hint`): different shape (event stream, not single response);
+  separate contract doc planned for 0.3.12.
+- Vector hydrate (`--vector-hydrate`): the engine writes a JSONL
+  sidecar; no `--json` single-response shape applies.
+- Compile-memory: same -- produces multiple files; no
+  single-response shape.
+
 ## [0.3.10] — 2026-08-29
 
 ### Added — Phase 1 of the cross-OS CLI JSON contract

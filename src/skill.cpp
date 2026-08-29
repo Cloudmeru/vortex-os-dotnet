@@ -489,14 +489,34 @@ static int CmdPackage(Paths^ p, String^ swarmId, bool dryRun) {
 
 // Append a decision to the durable history (used by the HITL gates on
 // moral-hinge picks so multi-episode dispatches can replay them).
+// v0.3.11 (Phase 1.1, G46): --json mode emits a single-line
+//   {"task_id","gate","severity","choice","reason","episode_number","index"}
+// per docs/cli-json-contract.md. The "index" is the new total count.
 static int CmdDecisionRecord(Paths^ p, String^ taskId, String^ gate, String^ severity,
-                             String^ choice, String^ reason, int episodeNumber) {
+                             String^ choice, String^ reason, int episodeNumber, bool asJson) {
     if (String::IsNullOrEmpty(gate) || String::IsNullOrEmpty(choice)) {
-        ConsoleX::Err("Usage: skill.exe --decision-record --task <id> --gate <name> --severity <HIGH|CRITICAL|LOW> --choice <text> [--reason <text>] [--episode <N>]");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"--decision-record requires --gate <name> and --choice <text>\"}");
+        } else {
+            ConsoleX::Err("Usage: skill.exe --decision-record --task <id> --gate <name> --severity <HIGH|CRITICAL|LOW> --choice <text> [--reason <text>] [--episode <N>]");
+        }
         return ExitCodes::BadInput;
     }
     int n = Decisions::Append(p, taskId, gate, severity, choice, reason, episodeNumber);
-    ConsoleX::Ok("Recorded decision #" + n + " for gate '" + gate + "': " + choice);
+    if (asJson) {
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"task_id\":\""); sb->Append(JsonX::EscapeJson(taskId == nullptr ? "" : taskId));
+        sb->Append("\",\"gate\":\""); sb->Append(JsonX::EscapeJson(gate));
+        sb->Append("\",\"severity\":\""); sb->Append(JsonX::EscapeJson(severity == nullptr ? "HIGH" : severity));
+        sb->Append("\",\"choice\":\""); sb->Append(JsonX::EscapeJson(choice));
+        sb->Append("\",\"reason\":\""); sb->Append(JsonX::EscapeJson(reason == nullptr ? "" : reason));
+        sb->Append("\",\"episode_number\":"); sb->Append(episodeNumber);
+        sb->Append(",\"index\":"); sb->Append(n);
+        sb->Append("}");
+        Console::WriteLine(sb->ToString());
+    } else {
+        ConsoleX::Ok("Recorded decision #" + n + " for gate '" + gate + "': " + choice);
+    }
     return 0;
 }
 
@@ -524,11 +544,18 @@ static int CmdCostReport(Paths^ p, String^ project, long sinceUnix, String^ agen
     return 0;
 }
 
-// Manual cost record (for one-off dispatches not in the V4 pipeline)
+// Manual cost record (for one-off dispatches not in the V4 pipeline).
+// v0.3.11 (Phase 1.1, G42): --json mode emits a single-line
+//   {"task_id","agent","project","model","tokens_in","tokens_out","duration_ms","cost_usd","tags"}
+// per docs/cli-json-contract.md. "tags" is always an array (empty when none).
 static int CmdCostRecord(Paths^ p, String^ taskId, String^ agent, String^ model,
-                         int tokensIn, int tokensOut, int durationMs, String^ tags) {
+                         int tokensIn, int tokensOut, int durationMs, String^ tags, bool asJson) {
     if (String::IsNullOrEmpty(taskId) || String::IsNullOrEmpty(agent) || String::IsNullOrEmpty(model)) {
-        ConsoleX::Err("Usage: --cost-record --task <id> --agent <name> --model <name> --tokens-in N --tokens-out N [--duration-ms N] [--tags t1,t2]");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"--cost-record requires --task, --agent, --model\"}");
+        } else {
+            ConsoleX::Err("Usage: --cost-record --task <id> --agent <name> --model <name> --tokens-in N --tokens-out N [--duration-ms N] [--tags t1,t2]");
+        }
         return ExitCodes::BadInput;
     }
     String^ project = String::IsNullOrEmpty(p->ProjectName) ? "_unfiled" : p->ProjectName;
@@ -537,34 +564,83 @@ static int CmdCostRecord(Paths^ p, String^ taskId, String^ agent, String^ model,
         : tags->Split(',');
     double cost = CostTracker::RecordTokens(p, taskId, agent, project, model,
                                             tokensIn, tokensOut, durationMs, tagArr);
-    ConsoleX::Ok("Recorded: task=" + taskId + " agent=" + agent + " model=" + model +
-        " tokens=" + (tokensIn + tokensOut) + " cost=$" + cost.ToString("F6"));
+    if (asJson) {
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"task_id\":\""); sb->Append(JsonX::EscapeJson(taskId));
+        sb->Append("\",\"agent\":\""); sb->Append(JsonX::EscapeJson(agent));
+        sb->Append("\",\"project\":\""); sb->Append(JsonX::EscapeJson(project));
+        sb->Append("\",\"model\":\""); sb->Append(JsonX::EscapeJson(model));
+        sb->Append("\",\"tokens_in\":"); sb->Append(tokensIn);
+        sb->Append(",\"tokens_out\":"); sb->Append(tokensOut);
+        sb->Append(",\"duration_ms\":"); sb->Append(durationMs);
+        sb->Append(",\"cost_usd\":");
+        sb->Append(cost.ToString("F6", System::Globalization::CultureInfo::InvariantCulture));
+        sb->Append(",\"tags\":[");
+        for (int i = 0; i < tagArr->Length; i++) {
+            if (i > 0) sb->Append(",");
+            sb->Append("\""); sb->Append(JsonX::EscapeJson(tagArr[i])); sb->Append("\"");
+        }
+        sb->Append("]}");
+        Console::WriteLine(sb->ToString());
+    } else {
+        ConsoleX::Ok("Recorded: task=" + taskId + " agent=" + agent + " model=" + model +
+            " tokens=" + (tokensIn + tokensOut) + " cost=$" + cost.ToString("F6"));
+    }
     // Also check the budget — the same gate the V4 pipeline would raise.
     CostTracker::CheckBudget(p, project, taskId);
     return 0;
 }
 
-// Cost estimate: compute cost for a given model + token counts without recording
-static int CmdCostEstimate(Paths^ p, String^ model, int tokensIn, int tokensOut) {
+// Cost estimate: compute cost for a given model + token counts without recording.
+// v0.3.11 (Phase 1.1, G38): --json mode emits a single-line
+//   {"model","tokens_in","tokens_out","cost_usd"}
+// per docs/cli-json-contract.md. Default mode is the human-readable block.
+static int CmdCostEstimate(Paths^ p, String^ model, int tokensIn, int tokensOut, bool asJson) {
     if (String::IsNullOrEmpty(model)) {
-        ConsoleX::Err("Usage: --cost-estimate --model <name> --tokens-in N --tokens-out N");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"--cost-estimate requires --model <name>\"}");
+        } else {
+            ConsoleX::Err("Usage: --cost-estimate --model <name> --tokens-in N --tokens-out N");
+        }
         return ExitCodes::BadInput;
     }
     double cost = CostTracker::ComputeCost(p, model, tokensIn, tokensOut);
-    Console::WriteLine("  Model:     " + model);
-    Console::WriteLine("  Tokens:    " + (tokensIn + tokensOut) + " (in=" + tokensIn + ", out=" + tokensOut + ")");
-    Console::WriteLine("  Cost USD:  $" + cost.ToString("F6"));
+    if (asJson) {
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"model\":\""); sb->Append(JsonX::EscapeJson(model));
+        sb->Append("\",\"tokens_in\":"); sb->Append(tokensIn);
+        sb->Append(",\"tokens_out\":"); sb->Append(tokensOut);
+        sb->Append(",\"cost_usd\":");
+        sb->Append(cost.ToString("F6", System::Globalization::CultureInfo::InvariantCulture));
+        sb->Append("}");
+        Console::WriteLine(sb->ToString());
+    } else {
+        Console::WriteLine("  Model:     " + model);
+        Console::WriteLine("  Tokens:    " + (tokensIn + tokensOut) + " (in=" + tokensIn + ", out=" + tokensOut + ")");
+        Console::WriteLine("  Cost USD:  $" + cost.ToString("F6"));
+    }
     return 0;
 }
 
 // Set a project budget (writes to <project>/_meta.json or .vortex/budgets.json)
-static int CmdBudgetSet(Paths^ p, String^ project, long tokensTotal, double usdTotal) {
+// v0.3.11 (Phase 1.1, G43): --json mode emits a single-line
+//   {"project","tokens_total","usd_total"}
+// per docs/cli-json-contract.md. Default mode is the human-readable OK line.
+static int CmdBudgetSet(Paths^ p, String^ project, long tokensTotal, double usdTotal, bool asJson) {
     if (String::IsNullOrEmpty(project)) {
-        ConsoleX::Err("Usage: --budget-set --project <name> [--tokens-total N] [--usd-total N]");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"--budget-set requires --project <name>\"}");
+        } else {
+            ConsoleX::Err("Usage: --budget-set --project <name> [--tokens-total N] [--usd-total N]");
+        }
         return ExitCodes::BadInput;
     }
     if (tokensTotal == 0 && usdTotal == 0) {
-        ConsoleX::Err("At least one of --tokens-total or --usd-total must be set.");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"at least one of --tokens-total or --usd-total must be set\"}");
+        } else {
+            ConsoleX::Err("At least one of --tokens-total or --usd-total must be set.");
+        }
         return ExitCodes::BadInput;
     }
     // Write to the project's _meta.json (per-project budget)
@@ -579,7 +655,17 @@ static int CmdBudgetSet(Paths^ p, String^ project, long tokensTotal, double usdT
         "{{\"name\":\"{0}\",\"budgets\":{{\"tokens_total\":{1},\"usd_total\":{2}}}}}",
         JsonX::EscapeJson(project), tokensTotal, usdTotal.ToString("F6", System::Globalization::CultureInfo::InvariantCulture));
     File::WriteAllText(projectMeta, json);
-    ConsoleX::Ok("Set budget for project '" + project + "': tokens_total=" + tokensTotal + " usd_total=$" + usdTotal.ToString("F2"));
+    if (asJson) {
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"project\":\""); sb->Append(JsonX::EscapeJson(project));
+        sb->Append("\",\"tokens_total\":"); sb->Append(tokensTotal);
+        sb->Append(",\"usd_total\":");
+        sb->Append(usdTotal.ToString("F6", System::Globalization::CultureInfo::InvariantCulture));
+        sb->Append("}");
+        Console::WriteLine(sb->ToString());
+    } else {
+        ConsoleX::Ok("Set budget for project '" + project + "': tokens_total=" + tokensTotal + " usd_total=$" + usdTotal.ToString("F2"));
+    }
     return 0;
 }
 
@@ -626,46 +712,85 @@ static int CmdBudgetShow(Paths^ p, String^ project, bool asJson) {
     return 0;
 }
 
-// List pending HITL approval requests
-static int CmdHitlStatus(Paths^ p) {
+// List pending HITL approval requests. v0.3.11 (Phase 1.1, G41):
+// --json mode emits a single-line
+//   {"pending":[{"task_id","status","severity","proposed_action"}],"total":N}
+// per docs/cli-json-contract.md.
+static int CmdHitlStatus(Paths^ p, bool asJson) {
     String^ pendingDir = Path::Combine(p->StateDir, "pending_approvals");
+    List<Tuple<String^, String^, String^, String^>^>^ items =
+        gcnew List<Tuple<String^, String^, String^, String^>^>();
     if (Directory::Exists(pendingDir)) {
-        bool any = false;
         for each (String ^ f in Directory::GetFiles(pendingDir, "*.json")) {
-            any = true;
-            Console::WriteLine("  ⏸  " + Path::GetFileNameWithoutExtension(f));
             JsonDocument^ doc = JsonX::ReadFile(f);
             if (doc == nullptr) continue;
             JsonElement root = doc->RootElement;
-            String^ line = String::Format(
-                "{{\"task_id\":\"{0}\",\"status\":\"{1}\",\"severity\":\"{2}\",\"proposed_action\":\"{3}\"}}",
+            items->Add(gcnew Tuple<String^, String^, String^, String^>(
                 JsonX::GetStrOr(root, "task_id", ""),
                 JsonX::GetStrOr(root, "status", ""),
                 JsonX::GetStrOr(root, "severity", ""),
-                JsonX::GetStrOr(root, "proposed_action", ""));
-            Console::WriteLine("      " + line);
+                JsonX::GetStrOr(root, "proposed_action", "")));
         }
-        if (!any) Console::WriteLine("  No pending HITL requests.");
-    } else {
+    }
+    if (asJson) {
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"pending\":[");
+        bool first = true;
+        for each (auto t in items) {
+            if (!first) sb->Append(",");
+            first = false;
+            sb->Append("{\"task_id\":\""); sb->Append(JsonX::EscapeJson(t->Item1));
+            sb->Append("\",\"status\":\""); sb->Append(JsonX::EscapeJson(t->Item2));
+            sb->Append("\",\"severity\":\""); sb->Append(JsonX::EscapeJson(t->Item3));
+            sb->Append("\",\"proposed_action\":\""); sb->Append(JsonX::EscapeJson(t->Item4));
+            sb->Append("\"}");
+        }
+        sb->Append("],\"total\":"); sb->Append(items->Count); sb->Append("}");
+        Console::WriteLine(sb->ToString());
+        return 0;
+    }
+    if (items->Count == 0) {
         Console::WriteLine("  No pending HITL requests.");
+    } else {
+        for each (auto t in items) {
+            Console::WriteLine("  ⏸  " + t->Item1);
+            Console::WriteLine("      {\"task_id\":\"" + t->Item1 +
+                "\",\"status\":\"" + t->Item2 +
+                "\",\"severity\":\"" + t->Item3 +
+                "\",\"proposed_action\":\"" + t->Item4 + "\"}");
+        }
     }
     return 0;
 }
 
-// Approve a pending HITL request
-static int CmdHitlApprove(Paths^ p, String^ taskId) {
+// Approve a pending HITL request. v0.3.11 (Phase 1.1, G39): --json mode
+// emits the persisted checkpoint as a single-line JSON object per
+// docs/cli-json-contract.md. Text mode is unchanged.
+static int CmdHitlApprove(Paths^ p, String^ taskId, bool asJson) {
     if (String::IsNullOrEmpty(taskId)) {
-        ConsoleX::Err("Usage: skill.exe --hitl-approve <task_id>");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"--hitl-approve requires <task_id>\"}");
+        } else {
+            ConsoleX::Err("Usage: skill.exe --hitl-approve <task_id>");
+        }
         return ExitCodes::BadInput;
     }
     String^ f = Path::Combine(p->StateDir, "pending_approvals", taskId + ".json");
     if (!File::Exists(f)) {
-        ConsoleX::Err("No pending HITL request for: " + taskId);
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"No pending HITL request for: " + JsonX::EscapeJson(taskId) + "\"}");
+        } else {
+            ConsoleX::Err("No pending HITL request for: " + taskId);
+        }
         return ExitCodes::BadInput;
     }
     JsonDocument^ doc = JsonX::ReadFile(f);
     if (doc == nullptr) {
-        ConsoleX::Err("Invalid checkpoint file: " + f);
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"Invalid checkpoint file: " + JsonX::EscapeJson(f) + "\"}");
+        } else {
+            ConsoleX::Err("Invalid checkpoint file: " + f);
+        }
         return ExitCodes::BadInput;
     }
     JsonElement root = doc->RootElement.Clone();
@@ -676,6 +801,7 @@ static int CmdHitlApprove(Paths^ p, String^ taskId) {
     String^ severity  = JsonX::GetStrOr(root, "severity", "HIGH");
     String^ action    = JsonX::GetStrOr(root, "proposed_action", "");
     long     tsEpoch  = JsonX::GetLong(root, "timestamp", 0);
+    long     approvedTs = (long)(DateTime::UtcNow - DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind::Utc)).TotalSeconds;
     String^ approvedAt = DateTime::Now.ToString("yyyy-MM-ddTHH:mm:ss", System::Globalization::CultureInfo::InvariantCulture);
     String^ body = String::Format(
         "{{ \"task_id\":\"{0}\", \"status\":\"APPROVED\", \"severity\":\"{1}\", "
@@ -687,7 +813,6 @@ static int CmdHitlApprove(Paths^ p, String^ taskId) {
         tsEpoch,
         approvedAt);
     File::WriteAllText(f, body);
-    ConsoleX::Ok("Approved: " + taskId);
 
     // Mirror CRITICAL-gate approvals into the durable decision history so
     // multi-episode dispatches can replay the operator's moral-hinge pick.
@@ -697,23 +822,49 @@ static int CmdHitlApprove(Paths^ p, String^ taskId) {
         Decisions::Append(p, taskId, "gate2_moral_hinge", severity, action,
                           "auto-recorded by --hitl-approve", 0);
     }
+    if (asJson) {
+        // Single-line JSON of the persisted checkpoint (the file body is
+        // already pretty-printed; we re-read it and emit GetRawText() so
+        // the schema is exactly what was written to disk).
+        JsonDocument^ reread = JsonX::ReadFile(f);
+        if (reread != nullptr) {
+            Console::WriteLine(reread->RootElement.GetRawText());
+        } else {
+            Console::WriteLine(body);
+        }
+    } else {
+        ConsoleX::Ok("Approved: " + taskId);
+    }
     return 0;
 }
 
-// Deny a pending HITL request
-static int CmdHitlDeny(Paths^ p, String^ taskId) {
+// Deny a pending HITL request. v0.3.11 (Phase 1.1, G40): --json mode
+// emits the persisted checkpoint as a single-line JSON object.
+static int CmdHitlDeny(Paths^ p, String^ taskId, bool asJson) {
     if (String::IsNullOrEmpty(taskId)) {
-        ConsoleX::Err("Usage: skill.exe --hitl-deny <task_id>");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"--hitl-deny requires <task_id>\"}");
+        } else {
+            ConsoleX::Err("Usage: skill.exe --hitl-deny <task_id>");
+        }
         return ExitCodes::BadInput;
     }
     String^ f = Path::Combine(p->StateDir, "pending_approvals", taskId + ".json");
     if (!File::Exists(f)) {
-        ConsoleX::Err("No pending HITL request for: " + taskId);
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"No pending HITL request for: " + JsonX::EscapeJson(taskId) + "\"}");
+        } else {
+            ConsoleX::Err("No pending HITL request for: " + taskId);
+        }
         return ExitCodes::BadInput;
     }
     JsonDocument^ doc = JsonX::ReadFile(f);
     if (doc == nullptr) {
-        ConsoleX::Err("Invalid checkpoint file: " + f);
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"Invalid checkpoint file: " + JsonX::EscapeJson(f) + "\"}");
+        } else {
+            ConsoleX::Err("Invalid checkpoint file: " + f);
+        }
         return ExitCodes::BadInput;
     }
     JsonElement root = doc->RootElement.Clone();
@@ -733,7 +884,6 @@ static int CmdHitlDeny(Paths^ p, String^ taskId) {
         tsEpoch,
         deniedAt);
     File::WriteAllText(f, body);
-    Console::WriteLine("  ✗ Denied: " + taskId);
 
     // CRITICAL-gate denials also land in the history (as the operator's
     // explicit choice to hold the line / off-screen resolution). Template
@@ -742,30 +892,99 @@ static int CmdHitlDeny(Paths^ p, String^ taskId) {
         Decisions::Append(p, taskId, "gate2_moral_hinge", severity,
                           "DENY: " + action, "auto-recorded by --hitl-deny", 0);
     }
+    if (asJson) {
+        JsonDocument^ reread = JsonX::ReadFile(f);
+        if (reread != nullptr) {
+            Console::WriteLine(reread->RootElement.GetRawText());
+        } else {
+            Console::WriteLine(body);
+        }
+    } else {
+        Console::WriteLine("  ✗ Denied: " + taskId);
+    }
     return 0;
 }
 
-// Run the Continuity Engine + invariant check on a task
-static int CmdInspectorCheck(Paths^ p, String^ taskId) {
+// Run the Continuity Engine + invariant check on a task.
+// v0.3.11 (Phase 1.1, G53): --json mode wraps the result as a single-line
+//   {"task_id","return_code","verdict","findings_count","invariants"}
+// per docs/cli-json-contract.md. The Continuity Engine is the underlying
+// Inspector::InspectExecution; in JSON mode we just run it and capture
+// the exit code + a small summary. For a richer JSON view use the
+// rich HTML/JSON formatters in the skill-side Vortex.AuditViewer.psm1.
+static int CmdInspectorCheck(Paths^ p, String^ taskId, bool asJson) {
     if (String::IsNullOrEmpty(taskId)) {
-        ConsoleX::Err("Usage: skill.exe --inspector-check <task_id>");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"--inspector-check requires <task_id>\"}");
+        } else {
+            ConsoleX::Err("Usage: skill.exe --inspector-check <task_id>");
+        }
         return ExitCodes::BadInput;
     }
-    Console::WriteLine("  >> Running Continuity Engine check on: " + taskId);
-    return Inspector::InspectExecution(p, taskId, "inspector.governance", 0);
+    if (asJson) {
+        int rc = Inspector::InspectExecution(p, taskId, "inspector.governance", 0);
+        // rc is the Continuity Engine verdict code (0 = pass, 1 = soft fail,
+        // 2 = hard fail). We don't have a findings-counts API yet; surface
+        // the task + return code so the consumer can decide what to do.
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"task_id\":\""); sb->Append(JsonX::EscapeJson(taskId));
+        sb->Append("\",\"return_code\":"); sb->Append(rc);
+        sb->Append(",\"verdict\":\""); sb->Append(rc == 0 ? "pass" : (rc == 1 ? "soft_fail" : "hard_fail"));
+        sb->Append("\",\"findings_count\":-1,\"invariants\":[]}");
+        Console::WriteLine(sb->ToString());
+        return rc;
+    } else {
+        Console::WriteLine("  >> Running Continuity Engine check on: " + taskId);
+        return Inspector::InspectExecution(p, taskId, "inspector.governance", 0);
+    }
 }
 
-// Print the full audit trail
-static int CmdAuditTrail(Paths^ p) {
+// Print the full audit trail. v0.3.11 (Phase 1.1, G54): --json mode emits
+//   {"entries":[<obj>,...],"total":N,"log":"<path>","truncated":bool}
+// per docs/cli-json-contract.md. Each entry is the parsed JSON of the
+// audit.jsonl line (verbatim, so the schema is whatever Audit::Emit wrote).
+// The JSONL file is read in full but capped at 1000 entries to keep the
+// JSON size bounded; a "truncated" flag tells the consumer.
+static int CmdAuditTrail(Paths^ p, bool asJson) {
     String^ log = Path::Combine(p->MemoryDir, "audit.jsonl");
     if (!File::Exists(log)) {
-        Console::WriteLine("  No audit trail yet (run --dispatch-master to generate one).");
+        if (asJson) {
+            Console::WriteLine("{\"entries\":[],\"total\":0,\"log\":\"" + JsonX::EscapeJson(log) + "\",\"truncated\":false}");
+        } else {
+            Console::WriteLine("  No audit trail yet (run --dispatch-master to generate one).");
+        }
+        return 0;
+    }
+    array<String^>^ lines = File::ReadAllLines(log);
+    if (asJson) {
+        const int kMax = 1000;
+        bool truncated = lines->Length > kMax;
+        int emit = Math::Min(lines->Length, kMax);
+        int start = Math::Max(0, lines->Length - emit);
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"entries\":[");
+        bool first = true;
+        for (int i = start; i < lines->Length; i++) {
+            if (String::IsNullOrEmpty(lines[i])) continue;
+            try {
+                JsonDocument^ doc = JsonDocument::Parse(lines[i]);
+                if (!first) sb->Append(",");
+                first = false;
+                sb->Append(doc->RootElement.GetRawText());
+            } catch (Exception^) {
+                // Skip unparseable lines in JSON mode.
+            }
+        }
+        sb->Append("],\"total\":"); sb->Append(lines->Length);
+        sb->Append(",\"log\":\""); sb->Append(JsonX::EscapeJson(log));
+        sb->Append("\",\"truncated\":"); sb->Append(truncated ? "true" : "false");
+        sb->Append("}");
+        Console::WriteLine(sb->ToString());
         return 0;
     }
     Console::WriteLine("  Audit trail (last 50 entries):");
-    array<String^>^ lines = File::ReadAllLines(log);
-    int start = Math::Max(0, lines->Length - 50);
-    for (int i = start; i < lines->Length; i++) {
+    int start2 = Math::Max(0, lines->Length - 50);
+    for (int i = start2; i < lines->Length; i++) {
         try {
             JsonDocument^ doc = JsonDocument::Parse(lines[i]);
             JsonElement root = doc->RootElement;
@@ -941,25 +1160,47 @@ static int CmdPluginTest(Paths^ p, String^ name, String^ inJson, int timeoutS) {
 }
 
 // Remove a user-scope plugin (does not touch skill-scope plugins).
-static int CmdPluginRemove(Paths^ p, String^ name) {
+// v0.3.11 (Phase 1.1, G45): --json mode emits a single-line
+//   {"plugin","path"} on success; {"error":..,"plugin":..} on failure.
+static int CmdPluginRemove(Paths^ p, String^ name, bool asJson) {
     if (String::IsNullOrEmpty(p->HomeDir)) {
-        ConsoleX::Err("VORTEX_HOME is not set; cannot remove user-scope plugins.");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"VORTEX_HOME is not set; cannot remove user-scope plugins.\"}");
+        } else {
+            ConsoleX::Err("VORTEX_HOME is not set; cannot remove user-scope plugins.");
+        }
         return 2;
     }
     String^ userDir = Plugin::PluginPath(Path::Combine(p->HomeDir, "plugins"), name);
     if (!Directory::Exists(userDir)) {
-        ConsoleX::Err("No user-scope plugin named: " + name);
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"No user-scope plugin named: " + JsonX::EscapeJson(name) + "\"}");
+        } else {
+            ConsoleX::Err("No user-scope plugin named: " + name);
+        }
         return 2;
     }
     try {
         Directory::Delete(userDir, true);
-        ConsoleX::Ok("Removed user-scope plugin: " + name);
+        if (asJson) {
+            StringBuilder^ sb = gcnew StringBuilder();
+            sb->Append("{\"plugin\":\""); sb->Append(JsonX::EscapeJson(name));
+            sb->Append("\",\"path\":\""); sb->Append(JsonX::EscapeJson(userDir));
+            sb->Append("\"}");
+            Console::WriteLine(sb->ToString());
+        } else {
+            ConsoleX::Ok("Removed user-scope plugin: " + name);
+        }
         Audit::Emit(p, "T2", "plugin.invoker", "plugin_remove", "ok",
             p->ProjectName, "", "LOW", "", "", name,
             gcnew array<String^> { "plugin", name }, 0);
         return 0;
     } catch (Exception^ ex) {
-        ConsoleX::Err("Remove failed: " + ex->Message);
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"Remove failed: " + JsonX::EscapeJson(ex->Message) + "\"}");
+        } else {
+            ConsoleX::Err("Remove failed: " + ex->Message);
+        }
         return 1;
     }
 }
@@ -971,13 +1212,25 @@ static int CmdPluginRemove(Paths^ p, String^ name) {
 //   4. Validate that plugin.json + invoke.<cmd-entry> exist
 //   5. Audit the install event
 // Pure C++/CLI via WebClient (no curl/PowerShell dependency).
-static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint) {
+// v0.3.11 (Phase 1.1, G44): --json mode emits
+//   {"plugin","path","tarball_url","size_bytes"} on success,
+//   {"error":..} on any failure. The verbose progress lines are
+//   suppressed in --json mode.
+static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint, bool asJson) {
     if (String::IsNullOrEmpty(url)) {
-        ConsoleX::Err("Usage: skill.exe --plugin-install <github-url> [--name <plugin-name>]");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"--plugin-install requires a GitHub URL\"}");
+        } else {
+            ConsoleX::Err("Usage: skill.exe --plugin-install <github-url> [--name <plugin-name>]");
+        }
         return 2;
     }
     if (String::IsNullOrEmpty(p->HomeDir)) {
-        ConsoleX::Err("VORTEX_HOME is not set; cannot install plugins.");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"VORTEX_HOME is not set; cannot install plugins.\"}");
+        } else {
+            ConsoleX::Err("VORTEX_HOME is not set; cannot install plugins.");
+        }
         return 2;
     }
     // Parse the URL: accept forms like
@@ -1011,14 +1264,18 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint) {
         owner = pathPart;
     }
     if (String::IsNullOrEmpty(owner) || String::IsNullOrEmpty(repo)) {
-        ConsoleX::Err("Could not parse GitHub URL: " + url);
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"Could not parse GitHub URL: " + JsonX::EscapeJson(url) + "\"}");
+        } else {
+            ConsoleX::Err("Could not parse GitHub URL: " + url);
+        }
         return 2;
     }
     String^ pluginName = String::IsNullOrEmpty(nameHint) ? repo : nameHint;
 
     // Download the tarball
     String^ tarballUrl = String::Format("https://api.github.com/repos/{0}/{1}/tarball", owner, repo);
-    Console::WriteLine("  -> Downloading " + tarballUrl);
+    if (!asJson) Console::WriteLine("  -> Downloading " + tarballUrl);
 
     String^ tarballPath = Path::Combine(Path::GetTempPath(),
         String::Format("vortex-plugin-{0}-{1}.tgz", pluginName,
@@ -1040,16 +1297,28 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint) {
         String^ curlErr = proc->StandardError->ReadToEnd();
         proc->WaitForExit(120000);
         if (proc->ExitCode != 0) {
-            ConsoleX::Err("curl download failed: " + curlErr);
+            if (asJson) {
+                Console::WriteLine("{\"error\":\"curl download failed: " + JsonX::EscapeJson(curlErr) + "\",\"tarball_url\":\"" + JsonX::EscapeJson(tarballUrl) + "\"}");
+            } else {
+                ConsoleX::Err("curl download failed: " + curlErr);
+            }
             return 1;
         }
     } catch (Exception^ ex) {
-        ConsoleX::Err("curl.exe not available: " + ex->Message);
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"curl.exe not available: " + JsonX::EscapeJson(ex->Message) + "\"}");
+        } else {
+            ConsoleX::Err("curl.exe not available: " + ex->Message);
+        }
         return 1;
     }
 
     if (!File::Exists(tarballPath)) {
-        ConsoleX::Err("Download returned no file");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"Download returned no file\",\"tarball_url\":\"" + JsonX::EscapeJson(tarballUrl) + "\"}");
+        } else {
+            ConsoleX::Err("Download returned no file");
+        }
         return 1;
     }
     long long size = 0;
@@ -1057,7 +1326,7 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint) {
         FileInfo^ fi = gcnew FileInfo(tarballPath);
         size = (long long)fi->Length;
     }
-    Console::WriteLine(String::Format("  -> Downloaded {0} bytes", size));
+    if (!asJson) Console::WriteLine(String::Format("  -> Downloaded {0} bytes", size));
 
     // Extract the tarball to the user-scope plugins dir
     String^ pluginsDir = Path::Combine(p->HomeDir, "plugins");
@@ -1069,7 +1338,7 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint) {
     }
     Directory::CreateDirectory(targetDir);
 
-    Console::WriteLine("  -> Extracting to " + targetDir);
+    if (!asJson) Console::WriteLine("  -> Extracting to " + targetDir);
     // Use tar.exe (always available on Windows 10+ and Server 2019+).
     String^ tarExe = "tar.exe";
     String^ tarArgs = String::Format("-xzf \"{0}\" -C \"{1}\" --strip-components=1", tarballPath, targetDir);
@@ -1084,13 +1353,21 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint) {
         proc->WaitForExit(60000);
         if (proc->ExitCode != 0) {
             String^ err = proc->StandardError->ReadToEnd();
-            ConsoleX::Err("Extract failed: " + err);
+            if (asJson) {
+                Console::WriteLine("{\"error\":\"Extract failed: " + JsonX::EscapeJson(err) + "\"}");
+            } else {
+                ConsoleX::Err("Extract failed: " + err);
+            }
             // Clean up the partial folder so a failed install doesn't leave junk
             try { Directory::Delete(targetDir, true); } catch (Exception^) {}
             return 1;
         }
     } catch (Exception^ ex) {
-        ConsoleX::Err("tar.exe not available: " + ex->Message);
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"tar.exe not available: " + JsonX::EscapeJson(ex->Message) + "\"}");
+        } else {
+            ConsoleX::Err("tar.exe not available: " + ex->Message);
+        }
         try { Directory::Delete(targetDir, true); } catch (Exception^) {}
         return 1;
     }
@@ -1098,32 +1375,59 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint) {
     // Validate that plugin.json + invoke.<ext> exist
     String^ manifestPath = Path::Combine(targetDir, "plugin.json");
     if (!File::Exists(manifestPath)) {
-        ConsoleX::Err("Plugin manifest not found at: " + manifestPath);
-        ConsoleX::Err("The repo must contain a plugin.json at its root.");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"Plugin manifest not found at: " + JsonX::EscapeJson(manifestPath) + "\",\"plugin\":\"" + JsonX::EscapeJson(pluginName) + "\"}");
+        } else {
+            ConsoleX::Err("Plugin manifest not found at: " + manifestPath);
+            ConsoleX::Err("The repo must contain a plugin.json at its root.");
+        }
         Directory::Delete(targetDir, true);
         return 2;
     }
     JsonDocument^ doc = JsonX::ReadFile(manifestPath);
     if (doc == nullptr) {
-        ConsoleX::Err("Invalid plugin.json: " + manifestPath);
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"Invalid plugin.json: " + JsonX::EscapeJson(manifestPath) + "\"}");
+        } else {
+            ConsoleX::Err("Invalid plugin.json: " + manifestPath);
+        }
         Directory::Delete(targetDir, true);
         return 2;
     }
     String^ manifestName = JsonX::GetStrOr(doc->RootElement, "name", pluginName);
     if (manifestName != pluginName) {
-        ConsoleX::Err("Plugin name in manifest (" + manifestName + ") does not match folder (" + pluginName + ")");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"Plugin name in manifest does not match folder\",\"manifest_name\":\"" + JsonX::EscapeJson(manifestName) + "\",\"folder_name\":\"" + JsonX::EscapeJson(pluginName) + "\"}");
+        } else {
+            ConsoleX::Err("Plugin name in manifest (" + manifestName + ") does not match folder (" + pluginName + ")");
+        }
         Directory::Delete(targetDir, true);
         return 2;
     }
     String^ entry = JsonX::GetStrOr(doc->RootElement, "command.entry", "invoke.ps1");
     String^ entryPath = Path::Combine(targetDir, entry);
     if (!File::Exists(entryPath)) {
-        ConsoleX::Err("Plugin entry not found at: " + entryPath);
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"Plugin entry not found at: " + JsonX::EscapeJson(entryPath) + "\",\"expected_entry\":\"" + JsonX::EscapeJson(entry) + "\"}");
+        } else {
+            ConsoleX::Err("Plugin entry not found at: " + entryPath);
+        }
         Directory::Delete(targetDir, true);
         return 2;
     }
 
-    ConsoleX::Ok("Installed plugin: " + pluginName);
+    if (asJson) {
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"plugin\":\""); sb->Append(JsonX::EscapeJson(pluginName));
+        sb->Append("\",\"path\":\""); sb->Append(JsonX::EscapeJson(targetDir));
+        sb->Append("\",\"tarball_url\":\""); sb->Append(JsonX::EscapeJson(tarballUrl));
+        sb->Append("\",\"size_bytes\":"); sb->Append((Int64)size);
+        sb->Append(",\"entry\":\""); sb->Append(JsonX::EscapeJson(entry));
+        sb->Append("\"}");
+        Console::WriteLine(sb->ToString());
+    } else {
+        ConsoleX::Ok("Installed plugin: " + pluginName);
+    }
     // Best-effort cleanup of the downloaded tarball
     try { File::Delete(tarballPath); } catch (Exception^) {}
     Audit::Emit(p, "T2", "plugin.invoker", "plugin_install", "ok",
@@ -1372,10 +1676,12 @@ static int CmdHelp() {
     Console::WriteLine();
     Console::WriteLine("GLOBAL FLAGS:");
     Console::WriteLine("  --json                         Emit a single-line JSON object instead of human-");
-    Console::WriteLine("                                readable text. Supported by every data-emitting verb");
+    Console::WriteLine("                                readable text. Supported by 23 of the 35 verbs");
     Console::WriteLine("                                listed below. See docs/cli-json-contract.md for");
     Console::WriteLine("                                the per-verb shape. Errors come out as");
     Console::WriteLine("                                {\"error\":\"...\"} on the same stdout stream.");
+    Console::WriteLine("                                Streaming verbs (--stream, --hint, ...) do not");
+    Console::WriteLine("                                support --json; they emit a stream of events");
     Console::WriteLine();
     Console::WriteLine("DISCOVERY & INSPECTION:");
     Console::WriteLine("  --agents-discover              List all available agents");
@@ -1479,27 +1785,63 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         return Commands::AgentsDiscover(p, incDep, outJson, extra->ToArray());
     }
     if (cmd == "--agents-inspect") {
-        if (args->Length < 2) { Console::WriteLine("Usage: --agents-inspect <name>"); return 1; }
-        return Commands::AgentsInspect(p, args[1]);
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; break; }
+        }
+        if (!asJson && args->Length < 2) { Console::WriteLine("Usage: --agents-inspect <name>"); return 1; }
+        String^ name = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
+        return Commands::AgentsInspect(p, name, asJson);
     }
     if (cmd == "--agents-validate") {
-        if (args->Length < 2) { Console::WriteLine("Usage: --agents-validate <file>"); return 1; }
-        return Commands::AgentsValidate(args[1]);
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; break; }
+        }
+        if (!asJson && args->Length < 2) { Console::WriteLine("Usage: --agents-validate <file>"); return 1; }
+        String^ file = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
+        return Commands::AgentsValidate(file, asJson);
     }
     if (cmd == "--agents-lint") {
-        String^ target = (args->Length >= 2) ? args[1] : "--all";
-        return Commands::AgentsLint(p, target);
+        bool asJson = false;
+        String^ target = "--all";
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; }
+            else if (target == "--all" && !args[i]->StartsWith("--")) { target = args[i]; }
+        }
+        return Commands::AgentsLint(p, target, asJson);
     }
     if (cmd == "--agents-graph") {
         String^ fmt = "ascii";
-        for (int i = 1; i < args->Length - 1; i++) {
-            if (args[i] == "--format") { fmt = args[i + 1]; break; }
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--format" && i + 1 < args->Length) { fmt = args[i + 1]; i++; }
+            else if (args[i] == "--json") { asJson = true; }
         }
-        return Commands::AgentsGraph(p, fmt);
+        return Commands::AgentsGraph(p, fmt, asJson);
     }
     if (cmd == "--agents-trace") {
-        if (args->Length < 2) { Console::WriteLine("Usage: --agents-trace <run_id>"); return 1; }
-        return Commands::AgentsTrace(p, args[1]);
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; break; }
+        }
+        if (!asJson && args->Length < 2) { Console::WriteLine("Usage: --agents-trace <run_id>"); return 1; }
+        String^ runId = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
+        return Commands::AgentsTrace(p, runId, asJson);
+    }
+    if (cmd == "--agents-factory-diff") {
+        // v0.3.11 (Phase 1.1, G52): wire the previously-unwired
+        // Commands::AgentsFactoryDiff to its CLI verb. Pre-v0.3.11 the
+        // function was defined in lib/Commands.h but no `if (cmd == ...)`
+        // line in Dispatch() reached it, so the verb was effectively a
+        // no-op (CmdHelp). This batch closes the gap.
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; break; }
+        }
+        if (!asJson && args->Length < 2) { Console::WriteLine("Usage: --agents-factory-diff <name>"); return 1; }
+        String^ name = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
+        return Commands::AgentsFactoryDiff(p, name, asJson);
     }
 
     // Dispatch ---------------------------------------------------------------
@@ -1625,24 +1967,33 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         return CmdPackage(p, args[1], dryRun);
     }
     if (cmd == "--decision-record") {
-        String^ taskId = nullptr;
-        String^ gate = nullptr;
+        // v0.3.11 (Phase 1.1, G46): --json mode emits a structured object
+        // per docs/cli-json-contract.md. The pre-v0.3.11 handler didn't
+        // increment i after consuming --reason / --episode / --severity so
+        // a multi-flag invocation could mis-parse the trailing arg. This
+        // batch fixes that AND adds the asJson forward.
+        String^ taskId = "";
+        String^ gate = "";
         String^ sev = "HIGH";
-        String^ choice = nullptr;
-        String^ reason = nullptr;
+        String^ choice = "";
+        String^ reason = "";
         int ep = 0;
-        for (int i = 1; i < args->Length - 1; i++) {
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
             String^ a = args[i];
-            if (a == "--task" || a == "--task-id")            taskId = args[i + 1];
-            else if (a == "--gate")                            gate   = args[i + 1];
-            else if (a == "--severity")                        sev    = args[i + 1];
-            else if (a == "--choice")                          choice = args[i + 1];
-            else if (a == "--reason")                          reason = args[i + 1];
-            else if (a == "--episode" || a == "--episode-number") {
-                int parsed; if (Int32::TryParse(args[i + 1], parsed)) ep = parsed;
+            if (a == "--task" || a == "--task-id") {
+                if (i + 1 < args->Length) { taskId = args[i + 1]; i++; }
             }
+            else if (a == "--gate" && i + 1 < args->Length)     { gate   = args[i + 1]; i++; }
+            else if (a == "--severity" && i + 1 < args->Length) { sev    = args[i + 1]; i++; }
+            else if (a == "--choice" && i + 1 < args->Length)   { choice = args[i + 1]; i++; }
+            else if (a == "--reason" && i + 1 < args->Length)   { reason = args[i + 1]; i++; }
+            else if (a == "--episode" || a == "--episode-number") {
+                if (i + 1 < args->Length) { int parsed; if (Int32::TryParse(args[i + 1], parsed)) ep = parsed; i++; }
+            }
+            else if (a == "--json") { asJson = true; }
         }
-        return CmdDecisionRecord(p, taskId, gate, sev, choice, reason, ep);
+        return CmdDecisionRecord(p, taskId, gate, sev, choice, reason, ep, asJson);
     }
     if (cmd == "--decision-list") {
         bool asJson = false;
@@ -1681,60 +2032,70 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         return CmdCostReport(p, proj == nullptr ? "" : proj, since, agent == nullptr ? "" : agent, asJson);
     }
     if (cmd == "--cost-record") {
-        String^ taskId = nullptr;
-        String^ agent  = nullptr;
-        String^ model  = nullptr;
-        String^ tags   = nullptr;
+        // v0.3.11 (Phase 1.1, G42): --json mode emits a structured summary
+        // per docs/cli-json-contract.md. The pre-v0.3.11 handler had an
+        // off-by-one (loop condition `i < args->Length - 1` and no `i++`
+        // after each consume) that dropped the last flag's value when
+        // --tags was the final flag. This batch fixes that AND adds the
+        // asJson forward.
+        String^ taskId = "";
+        String^ agent  = "";
+        String^ model  = "";
+        String^ tags   = "";
         int tokIn = 0;
         int tokOut = 0;
         int durMs = 0;
-        for (int i = 1; i < args->Length - 1; i++) {
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
             String^ a = args[i];
-            if (a == "--task")             taskId = args[i + 1];
-            else if (a == "--agent")        agent  = args[i + 1];
-            else if (a == "--model")        model  = args[i + 1];
-            else if (a == "--tokens-in")    { int tmp; if (Int32::TryParse(args[i + 1], tmp)) tokIn  = tmp; }
-            else if (a == "--tokens-out")   { int tmp; if (Int32::TryParse(args[i + 1], tmp)) tokOut = tmp; }
-            else if (a == "--duration-ms")  { int tmp; if (Int32::TryParse(args[i + 1], tmp)) durMs  = tmp; }
-            else if (a == "--tags")         tags   = args[i + 1];
+            if      (a == "--task"        && i + 1 < args->Length) { taskId = args[++i]; }
+            else if (a == "--agent"       && i + 1 < args->Length) { agent  = args[++i]; }
+            else if (a == "--model"       && i + 1 < args->Length) { model  = args[++i]; }
+            else if (a == "--tokens-in"   && i + 1 < args->Length) { int tmp; if (Int32::TryParse(args[i + 1], tmp)) { tokIn  = tmp; i++; } }
+            else if (a == "--tokens-out"  && i + 1 < args->Length) { int tmp; if (Int32::TryParse(args[i + 1], tmp)) { tokOut = tmp; i++; } }
+            else if (a == "--duration-ms" && i + 1 < args->Length) { int tmp; if (Int32::TryParse(args[i + 1], tmp)) { durMs  = tmp; i++; } }
+            else if (a == "--tags"        && i + 1 < args->Length) { tags   = args[++i]; }
+            else if (a == "--json") { asJson = true; }
         }
-        return CmdCostRecord(p, taskId, agent, model, tokIn, tokOut, durMs, tags);
+        return CmdCostRecord(p, taskId, agent, model, tokIn, tokOut, durMs, tags, asJson);
     }
     if (cmd == "--cost-estimate") {
+        // v0.3.11 (Phase 1.1, G38): --json mode emits a single-line
+        // {"model":..,"tokens_in":N,"tokens_out":N,"cost_usd":N.NNNNNN}
+        // per docs/cli-json-contract.md. The pre-v0.3.11 dispatch had a
+        // duplicate block (the first match wins; the second was dead) --
+        // this batch collapses it to a single handler.
         String^ model = nullptr;
         int tokIn = 0;
         int tokOut = 0;
-        for (int i = 1; i < args->Length - 1; i++) {
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
             String^ a = args[i];
-            if (a == "--model")        model  = args[i + 1];
-            else if (a == "--tokens-in")  { int tmp; if (Int32::TryParse(args[i + 1], tmp)) tokIn  = tmp; }
-            else if (a == "--tokens-out") { int tmp; if (Int32::TryParse(args[i + 1], tmp)) tokOut = tmp; }
+            if (a == "--model" && i + 1 < args->Length)        { model  = args[i + 1]; i++; }
+            else if (a == "--tokens-in"  && i + 1 < args->Length) { int tmp; if (Int32::TryParse(args[i + 1], tmp)) tokIn  = tmp; i++; }
+            else if (a == "--tokens-out" && i + 1 < args->Length) { int tmp; if (Int32::TryParse(args[i + 1], tmp)) tokOut = tmp; i++; }
+            else if (a == "--json")                              { asJson = true; }
         }
-        return CmdCostEstimate(p, model, tokIn, tokOut);
-    }
-    if (cmd == "--cost-estimate") {
-        String^ model = nullptr;
-        int tokIn = 0, tokOut = 0;
-        for (int i = 1; i < args->Length - 1; i++) {
-            String^ a = args[i];
-            if (a == "--model")        model  = args[i + 1];
-            else if (a == "--tokens-in")  Int32::TryParse(args[i + 1], tokIn);
-            else if (a == "--tokens-out") Int32::TryParse(args[i + 1], tokOut);
-        }
-        return CmdCostEstimate(p, model, tokIn, tokOut);
+        return CmdCostEstimate(p, model, tokIn, tokOut, asJson);
     }
     if (cmd == "--budget-set") {
-        String^ proj = nullptr;
+        // v0.3.11 (Phase 1.1, G43): --json mode emits a structured summary
+        // per docs/cli-json-contract.md. Pre-v0.3.11 had the same off-by-one
+        // as --cost-record; fixed in this batch.
+        String^ proj = "";
         Int64 tokTotal = 0;
         double usdTotal = 0.0;
-        for (int i = 1; i < args->Length - 1; i++) {
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
             String^ a = args[i];
-            if (a == "--project")        proj = args[i + 1];
-            else if (a == "--tokens-total")  { Int64 tmp; if (Int64::TryParse(args[i + 1], tmp)) tokTotal = tmp; }
-            else if (a == "--usd-total")     Double::TryParse(args[i + 1], System::Globalization::NumberStyles::Float,
-                                                            System::Globalization::CultureInfo::InvariantCulture, usdTotal);
+            if      (a == "--project"        && i + 1 < args->Length) { proj = args[++i]; }
+            else if (a == "--tokens-total"   && i + 1 < args->Length) { Int64 tmp; if (Int64::TryParse(args[i + 1], tmp)) { tokTotal = tmp; i++; } }
+            else if (a == "--usd-total"      && i + 1 < args->Length) { Double::TryParse(args[i + 1], System::Globalization::NumberStyles::Float,
+                                                                          System::Globalization::CultureInfo::InvariantCulture, usdTotal);
+                                                                          i++; }
+            else if (a == "--json") { asJson = true; }
         }
-        return CmdBudgetSet(p, proj, (long)tokTotal, usdTotal);
+        return CmdBudgetSet(p, proj, (long)tokTotal, usdTotal, asJson);
     }
     if (cmd == "--budget-show") {
         String^ proj = nullptr;
@@ -1812,22 +2173,49 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     }
 
     // HITL -------------------------------------------------------------------
-    if (cmd == "--hitl-status")  return CmdHitlStatus(p);
+    if (cmd == "--hitl-status") {
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; }
+        }
+        return CmdHitlStatus(p, asJson);
+    }
     if (cmd == "--hitl-approve") {
-        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --hitl-approve <task_id>"); return 2; }
-        return CmdHitlApprove(p, args[1]);
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; break; }
+        }
+        if (!asJson && args->Length < 2) { ConsoleX::Err("Usage: skill.exe --hitl-approve <task_id>"); return 2; }
+        String^ taskId = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
+        return CmdHitlApprove(p, taskId, asJson);
     }
     if (cmd == "--hitl-deny") {
-        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --hitl-deny <task_id>"); return 2; }
-        return CmdHitlDeny(p, args[1]);
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; break; }
+        }
+        if (!asJson && args->Length < 2) { ConsoleX::Err("Usage: skill.exe --hitl-deny <task_id>"); return 2; }
+        String^ taskId = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
+        return CmdHitlDeny(p, taskId, asJson);
     }
 
     // Inspection -------------------------------------------------------------
     if (cmd == "--inspector-check") {
-        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --inspector-check <task_id>"); return 2; }
-        return CmdInspectorCheck(p, args[1]);
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; break; }
+        }
+        if (!asJson && args->Length < 2) { ConsoleX::Err("Usage: skill.exe --inspector-check <task_id>"); return 2; }
+        String^ taskId = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
+        return CmdInspectorCheck(p, taskId, asJson);
     }
-    if (cmd == "--audit-trail")  return CmdAuditTrail(p);
+    if (cmd == "--audit-trail") {
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; }
+        }
+        return CmdAuditTrail(p, asJson);
+    }
 
     // Plugins ----------------------------------------------------------------
     if (cmd == "--plugins-list") {
@@ -1852,17 +2240,30 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         return CmdPluginTest(p, args[1], inJson, to);
     }
     if (cmd == "--plugin-remove") {
-        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --plugin-remove <name>"); return 2; }
-        return CmdPluginRemove(p, args[1]);
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; break; }
+        }
+        if (!asJson && args->Length < 2) { ConsoleX::Err("Usage: skill.exe --plugin-remove <name>"); return 2; }
+        String^ name = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
+        return CmdPluginRemove(p, name, asJson);
     }
     if (cmd == "--plugin-install") {
-        // --plugin-install <url> [--name <plugin-name>]
-        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --plugin-install <github-url> [--name <name>]"); return 2; }
-        String^ nameHint = "";
-        for (int i = 2; i < args->Length; i++) {
-            if (args[i] == "--name" && i + 1 < args->Length) { nameHint = args[++i]; }
+        // --plugin-install <url> [--name <plugin-name>] [--json]
+        bool asJson = false;
+        for (int i = 1; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; }
         }
-        return CmdPluginInstall(p, args[1], nameHint);
+        if (!asJson && args->Length < 2) { ConsoleX::Err("Usage: skill.exe --plugin-install <github-url> [--name <name>]"); return 2; }
+        String^ url = "";
+        String^ nameHint = "";
+        for (int i = 1; i < args->Length; i++) {
+            String^ a = args[i];
+            if (a == "--json") continue;
+            if (a == "--name" && i + 1 < args->Length) { nameHint = args[++i]; continue; }
+            if (url == "" && !a->StartsWith("--")) { url = a; }
+        }
+        return CmdPluginInstall(p, url, nameHint, asJson);
     }
     if (cmd == "--plugin-invoke") {
         // Engine-side test path used by tests/test_engine.ps1
