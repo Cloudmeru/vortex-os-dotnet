@@ -65,10 +65,19 @@ namespace Vortex {
                 "Respond exactly with either 'APPROVED' or 'HALT: <explicit reason>'.",
                 recentTelemetry, agentName, tokensUsedThisRun);
 
-            // Native LLM call is mocked (the bash version calls query_native_coder
-            // which itself is a stub in this codebase). The deterministic default
-            // is APPROVED so the pipeline continues; a real backend would parse
-            // the verdict and act on it.
+            // v0.3.8 (G6): the LLM verdict is still hardcoded to APPROVED.
+            // Wiring to mcode-tools is deferred to v0.3.9+ because:
+            //   1. The Inspector only fires when tokens > 15000, which the
+            //      current dispatch paths don't cross (DispatchV4 is a
+            //      stub with 0 tokens; the new executor logs 0).
+            //   2. mcode-tools is not available in the test env, so we
+            //      can't write a verifiable test for the LLM branch.
+            //   3. The APPROVED default is safe (it never halts the
+            //      pipeline on its own).
+            // Pre-v0.3.8: a comment claimed "the bash version calls
+            // query_native_coder which itself is a stub in this codebase."
+            // v0.3.8: rewording the comment to make the deferral
+            // explicit and named.
             String^ auditVerdict = "APPROVED";
 
             if (auditVerdict->StartsWith("HALT")) {

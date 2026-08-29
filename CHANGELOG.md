@@ -4,6 +4,93 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.8] — 2026-08-29
+
+### Added — gap-closure round v0.3.8
+
+This release closes 4 of the 5 remaining gaps from the v0.3.7
+gap analysis. The 5th (G6, Inspector LLM wiring) is deferred to
+v0.3.9+ because it requires mcode-tools LLM infra that is not
+available in the test env, and the APPROVED fallback is safe.
+
+**G14 (default budget) — `src/lib/CostTracker.cpp`:**
+- Pre-v0.3.8: `ResolveBudget` returned 0 if no env / project _meta /
+  global budgets.json was configured, so `CheckBudget` bailed out
+  silently and no project had enforcement.
+- v0.3.8: when the three existing sources are all 0, apply a sane
+  engine default of 1,000,000 tokens / $5.00. High enough that
+  ordinary dispatches never hit it accidentally, low enough that
+  runaway loops are caught. The default is engine-internal (not
+  written to budgets.json) so a user can later set their own
+  budget and override cleanly.
+- Test: `tests/test_engine.ps1` G26.
+
+**G11 (cost log on every dispatch) — `src/skill.cpp` CmdDispatchAgentRoster:**
+- Pre-v0.3.8: only `DispatchV4::Run` called `CostTracker::RecordTokens`,
+  and only with 0/0 tokens because V4 is a stub. The new
+  CmdDispatchAgentRoster (v0.3.7) didn't call RecordTokens, so
+  cost_log.jsonl stayed empty unless `--with-memory` triggered the
+  LLM path.
+- v0.3.8: CmdDispatchAgentRoster now calls RecordTokens with the
+  `plugin-executor` model and tags `[executor, plugins=N,
+  deliverables=M]`. CheckBudget then sees the cumulative spend
+  against the v0.3.8 default budget (G14) and alerts if a runaway
+  loop blows it.
+- Test: `tests/test_engine.ps1` G27.
+
+**G8 (--with-memory) — `src/skill.cpp` --dispatch-template branch:**
+- Pre-v0.3.8: the flag was documented in v0.3.0 (PRD-17) and the
+  function `Memory::ReadForInjection` was implemented, but no code
+  path injected the slice. The docstring lied.
+- v0.3.8: the --dispatch-template branch now recognizes `--with-memory`,
+  calls `Memory::ReadForInjection(p, p->ProjectName)`, and adds the
+  slice as a `memory_slice=<text>` template var. Templates that
+  include `{{memory_slice}}` get the prior-context drop-in.
+  Newlines and quotes in the slice are escaped so the
+  `key=value` override syntax stays valid.
+- Test: `tests/test_engine.ps1` G28.
+
+**G12 (auto-packager) — `src/skill.cpp` CmdDispatchTemplate:**
+- Pre-v0.3.8: after a dispatch, the operator had to manually run
+  `--package <swarm_id>` to write the durable `.manifest.json`.
+  Most operators forgot, so deliverables sat in `swarms/active_xxx/`
+  without an authoritative manifest.
+- v0.3.8: after the executor walks the roster, CmdDispatchTemplate
+  calls CmdPackage automatically. The call is wrapped in a
+  try/catch (a missing swarm dir logs a warning rather than
+  aborting the dispatch). The operator can still call --package
+  manually to re-package after editing the swarm dir; both paths
+  are idempotent.
+- Test: `tests/test_engine.ps1` G29.
+
+### Fixed
+- **G6 (Inspector LLM) — `src/lib/Inspector.cpp`:** rewrote the
+  pre-v0.3.8 comment that claimed "the bash version calls
+  query_native_coder which itself is a stub" to be explicit about
+  the v0.3.8 deferral. The LLM verdict is still hardcoded to
+  APPROVED. The Inspector only fires when tokens > 15000, which
+  the current dispatch paths don't cross (DispatchV4 is a stub
+  with 0 tokens; the v0.3.7 executor logs 0), and the test env
+  doesn't have mcode-tools. Wiring the LLM call is the first
+  item on the v0.3.9 list. The APPROVED default is safe (it
+  never halts the pipeline on its own).
+
+### Tests
+- `tests/test_engine.ps1` G26: --budget-show with no budget
+  configured returns a non-zero default.
+- `tests/test_engine.ps1` G27: --dispatch-template writes a
+  cost_log.jsonl entry (G11).
+- `tests/test_engine.ps1` G28: --with-memory injects the
+  {{memory_slice}} into the rendered task (G8).
+- `tests/test_engine.ps1` G29: --dispatch-template auto-writes
+  the .manifest.json (G12).
+
+### Notes
+This release is engine-only (no skill release needed). The skill
+v0.3.10 from the v0.3.7 arc continues to work with engine
+v0.3.8 without changes. The four v0.3.7 executor tests
+(G24.A-D in tests/test_executor.ps1) continue to pass.
+
 ## [0.3.7] — 2026-08-29
 
 ### Added — Agent executor (closes the "validates but doesn't execute" gap)

@@ -1068,6 +1068,80 @@ Write-Output '===END==='
     }
 
     # -----------------------------------------------------------------------
+    # G26: --budget-show with no budget configured returns a sane default
+    # (v0.3.8 - closes G14 from the gap analysis)
+    # Pre-v0.3.8: --budget-show printed "tokens_total: 0" and the cost
+    # tracker skipped enforcement. v0.3.8: a sane default is applied so
+    # every project always has a budget to enforce.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[26] --budget-show with no budget configured returns a default"
+    $defaultProject = "g26_default_$((Get-Date).Ticks)"
+    $defaultBudgetOut = (& pwsh -NoProfile -File $skillPath --budget-show --project $defaultProject 2>&1 | Out-String)
+    Write-Host "  --- budget-show output ---"
+    $defaultBudgetOut.Split("`n") | ForEach-Object { Write-Host "  $_" }
+    $defaultTokens = if ($defaultBudgetOut -match 'tokens_total:\s*(\d+)') { [int]$Matches[1] } else { 0 }
+    Check "G26: --budget-show with no budget returns a non-zero default" { $defaultTokens -gt 0 }
+
+    # -----------------------------------------------------------------------
+    # G27: every dispatch writes a cost_log.jsonl entry (v0.3.8 - G11)
+    # Pre-v0.3.8 the executor path never called CostTracker::RecordTokens,
+    # so cost_log.jsonl was empty unless --with-memory triggered the LLM.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[27] --dispatch-template writes a cost_log.jsonl entry"
+    $g27Proj = "g27_costlog_$((Get-Date).Ticks)"
+    $g27Template = Join-Path $swarmsDir 'g27_costlog.json'
+    $g27Body = '{"name":"g27_costlog","version":"0.0.0","objective_template":"smoke","substitutions":{},"deliverables":[],"hitl_gates":[],"self_heal_targets":[],"agent_roster":["media-stack"]}'
+    Set-Content -LiteralPath $g27Template -Value $g27Body -Encoding UTF8
+    $g27CostLog = Join-Path $scratchHome 'state\cost_log.jsonl'
+    $g27Before = if (Test-Path $g27CostLog) { (Get-Content $g27CostLog).Count } else { 0 }
+    & pwsh -NoProfile -File $skillPath --dispatch-template $g27Template 2>&1 | Out-Null
+    $g27After = if (Test-Path $g27CostLog) { (Get-Content $g27CostLog).Count } else { 0 }
+    Check "G27: cost_log.jsonl has a new entry after a dispatch" { $g27After -gt $g27Before }
+
+    # -----------------------------------------------------------------------
+    # G28: --with-memory injects the prior-context slice into the task
+    # (v0.3.8 - G8). The flag was documented in v0.3.0 but never wired.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[28] --with-memory injects the memory slice into the rendered task"
+    $g28Proj = "g28_mem_$((Get-Date).Ticks)"
+    # Compile a memory slice for this project
+    & pwsh -NoProfile -File $skillPath --compile-memory --project $g28Proj 2>&1 | Out-Null
+    $g28Template = Join-Path $swarmsDir 'g28_mem.json'
+    $g28Marker = "G28_UNIQUE_MARKER_$([guid]::NewGuid().ToString('N').Substring(0,8))"
+    $g28BodyObj = @{ name = "g28_mem"; version = "0.0.0"; objective_template = "before-marker $g28Marker {{memory_slice}} after-marker"; substitutions = @{}; deliverables = @(); hitl_gates = @(); self_heal_targets = @(); agent_roster = @("media-stack") }
+    $g28BodyObj | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $g28Template -Encoding UTF8
+    # The engine's --dispatch-template branch doesn't parse --project; the
+    # wrapper (skill.ps1) sets $env:VORTEX_PROJECT, but the engine's Paths
+    # is built before the wrapper sees --with-memory. For the test, set
+    # $env:VORTEX_PROJECT before the dispatch and unset after.
+    $env:VORTEX_PROJECT = $g28Proj
+    & pwsh -NoProfile -File $skillPath --dispatch-template $g28Template --with-memory 2>&1 | Out-Null
+    $g28TaskFile = Get-ChildItem -Recurse -Filter 'golden_path_*.md' $scratchHome -ErrorAction SilentlyContinue | Select-Object -First 1
+    $g28TaskContent = if ($g28TaskFile) { Get-Content $g28TaskFile.FullName -Raw } else { '' }
+    Check "G28: --with-memory substituted {{memory_slice}} (marker present, placeholder absent)" {
+        $g28TaskContent.Contains($g28Marker) -and -not $g28TaskContent.Contains('{{memory_slice}}')
+    }
+
+    # -----------------------------------------------------------------------
+    # G29: --dispatch-template auto-writes the .manifest.json
+    # (v0.3.8 - G12). Pre-v0.3.8 the operator had to call --package
+    # manually after every dispatch.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[29] --dispatch-template auto-writes the .manifest.json"
+    $g29Proj = "g29_pkg_$((Get-Date).Ticks)"
+    $env:VORTEX_PROJECT = $g29Proj
+    $g29Template = Join-Path $swarmsDir 'g29_pkg.json'
+    $g29Body = '{"name":"g29_pkg","version":"0.0.0","objective_template":"smoke","substitutions":{},"deliverables":[],"hitl_gates":[],"self_heal_targets":[],"agent_roster":["media-stack"]}'
+    Set-Content -LiteralPath $g29Template -Value $g29Body -Encoding UTF8
+    & pwsh -NoProfile -File $skillPath --dispatch-template $g29Template 2>&1 | Out-Null
+    $g29Manifest = Join-Path $scratchHome "deliverables/$g29Proj/.manifest.json"
+    Check "G29: .manifest.json was auto-written to deliverables/<project>/" { Test-Path $g29Manifest }
+
+    # -----------------------------------------------------------------------
     # Summary
     # -----------------------------------------------------------------------
     Write-Host ""

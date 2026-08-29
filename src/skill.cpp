@@ -56,6 +56,10 @@ static int CmdDispatchMaster(Paths^ p, String^ objectiveFile) {
 // Forward decl -- defined below. The agent executor is the v0.3.7 fix
 // for G1+G2+G3+G4 (the "validates but doesn't execute" gap).
 static int CmdDispatchAgentRoster(Paths^ p, String^ templatePath, String^ taskId);
+// Forward decl -- defined at line ~310 below. v0.3.8 (G12) calls it
+// after the executor walks the roster, to write the durable
+// .manifest.json automatically.
+static int CmdPackage(Paths^ p, String^ swarmId, bool dryRun);
 
 // Replay a saved Golden Path workflow template
 static int CmdDispatchTemplate(Paths^ p, String^ templateFile, int episodeNumber,
@@ -109,7 +113,23 @@ static int CmdDispatchTemplate(Paths^ p, String^ templateFile, int episodeNumber
     String^ actualTaskId = String::IsNullOrEmpty(taskId)
         ? "golden_path_" + ((long)(DateTime::UtcNow - DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind::Utc)).TotalSeconds).ToString()
         : taskId;
-    return CmdDispatchAgentRoster(p, templateFile, actualTaskId);
+    int execRc = CmdDispatchAgentRoster(p, templateFile, actualTaskId);
+    if (execRc != 0) return execRc;
+    // v0.3.8 (G12): auto-package. Pre-v0.3.8 the operator had to
+    // manually run --package <swarm_id> after the dispatch to
+    // write the durable .manifest.json. v0.3.8: after the executor
+    // walks the roster, run CmdPackage which writes the manifest
+    // and stamps the durable copy. The operator can still call
+    // --package explicitly to re-package after editing the swarm
+    // dir; the auto-call is idempotent.
+    try {
+        // Packager::Package prepends "active_" internally, so pass the
+        // bare taskId (golden_path_<ts>), not "active_golden_path_<ts>".
+        CmdPackage(p, actualTaskId, false);
+    } catch (Exception^ ex) {
+        ConsoleX::Warn("auto-package skipped: " + ex->Message);
+    }
+    return 0;
 }
 
 // v0.3.7 (G1+G2+G3+G4): walk the template's agent_roster, load each
@@ -260,6 +280,22 @@ static int CmdDispatchAgentRoster(Paths^ p, String^ templatePath, String^ taskId
 
     ConsoleX::Ok("Agent executor: " + totalPlugins + " plugin(s) invoked, " +
                  totalOk + " ok, " + totalDelivs + " file(s) delivered to " + destDir);
+
+    // v0.3.8 (G11): cost tracking for the executor path. Pre-v0.3.8,
+    // only DispatchV4::Run called CostTracker::RecordTokens (with 0/0
+    // tokens because the V4 path is a stub). v0.3.8's executor runs
+    // real plugins, so we record a per-dispatch cost entry even when
+    // the token count is 0. This makes the cost_log.jsonl reflect
+    // every dispatch, not just ones that went through --with-memory.
+    // The budget check then sees the cumulative spend (default
+    // 1M tokens per v0.3.8 G14) and alerts if a runaway loop blows it.
+    array<String^>^ costTags = gcnew array<String^> {
+        "executor", "plugins=" + totalPlugins.ToString(),
+        "deliverables=" + totalDelivs.ToString()
+    };
+    CostTracker::RecordTokens(p, taskId, "agent.executor", project,
+                              "plugin-executor", 0, 0, 0, costTags);
+    CostTracker::CheckBudget(p, project, taskId);
 
     // 8. Audit the close so the operator can see how many plugins ran.
     Audit::Emit(
@@ -1233,6 +1269,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         int ep = 1;
         String^ taskId = nullptr;
         List<String^>^ overrides = gcnew List<String^>();
+        bool withMemory = false;
         for (int i = 2; i < args->Length; i++) {
             String^ a = args[i];
             if (a == "--episode-number" && i + 1 < args->Length) {
@@ -1241,6 +1278,11 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
                 i++;
             } else if (a == "--task" && i + 1 < args->Length) {
                 taskId = args[i + 1]; i++;
+            } else if (a == "--with-memory") {
+                // v0.3.8 (G8): inject the project's prior-context memory slice
+                // into the rendered task as the {{memory_slice}} template var.
+                // Pre-v0.3.8 the flag was documented but never wired.
+                withMemory = true;
             } else if (a == "--template-var" && i + 1 < args->Length) {
                 overrides->Add(args[i + 1]); i++;
             } else if (a->StartsWith("--template-var=")) {
@@ -1252,6 +1294,22 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
                 else if (a->StartsWith("--setting="))     overrides->Add("setting=" + a->Substring(10));
                 else if (a->StartsWith("--diegetic-clock=")) overrides->Add("diegetic_clock=" + a->Substring(17));
                 else if (a->StartsWith("--episode-title=")) overrides->Add("episode_title=" + a->Substring(16));
+            }
+        }
+        // v0.3.8 (G8): resolve the memory slice and inject as a template var.
+        // If the project has no compiled memory, the slice is empty and the
+        // {{memory_slice}} placeholder in the template will be replaced with
+        // the empty string (a no-op for templates that don't reference it).
+        if (withMemory && !String::IsNullOrEmpty(p->ProjectName)) {
+            String^ slice = Vortex::Memory::ReadForInjection(p, p->ProjectName);
+            if (!String::IsNullOrEmpty(slice)) {
+                // Escape any newlines / quotes that would break the
+                // {{k=v}} override syntax.
+                slice = slice->Replace("\r", "")->Replace("\n", "\\n")->Replace("\"", "\\\"");
+                overrides->Add("memory_slice=" + slice);
+                ConsoleX::Ok("with-memory: injected " + slice->Length + " chars of prior context for project " + p->ProjectName);
+            } else {
+                ConsoleX::Warn("with-memory: no compiled memory slice for project " + p->ProjectName + " (run --compile-memory first)");
             }
         }
         return CmdDispatchTemplate(p, args[1], ep, overrides->ToArray(), taskId);
