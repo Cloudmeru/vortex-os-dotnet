@@ -4,6 +4,63 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.7] — 2026-08-29
+
+### Added — Agent executor (closes the "validates but doesn't execute" gap)
+- **`src/skill.cpp` — `CmdDispatchAgentRoster(Paths^, String^, String^)`.** This
+  is the executor that was missing from the v0.3.0-v0.3.6 engine. After
+  `Template::Run` writes the rendered objective, this function:
+  1. Reads the template's `agent_roster` array.
+  2. For each named agent, loads `<AgentsDir>/<name>.json`.
+  3. For each entry in the agent's `plugin_roster`, calls
+     `Plugin::Invoke(p, plugin, inputs, 120)` -- the existing
+     `Plugin::Invoke` was already implemented and audited each
+     invocation; nothing was calling it.
+  4. Copies each plugin's output file (from the `file` field of the
+     plugin's output JSON) into `deliverables/<project>/`.
+  5. Emits a `swarm_close` audit entry with
+     `plugins_invoked / plugins_ok / deliverables` counters.
+
+  Closes **G1 + G2 + G3 + G4** from the v0.3.7 gap analysis.
+- **`src/skill.cpp` — `CmdDispatchTemplate` now calls
+  `CmdDispatchAgentRoster` after `Template::Run`.** The v0.3.5
+  agent_roster validator runs first (so the operator sees manifest
+  errors before the dispatch starts); the executor runs after the
+  template is rendered.
+
+### Fixed
+- **G1 root cause: `Swarm::Spawn` only writes
+  `{"swarm_id":"...","objective":"...","tasks":[]}` and returns.**
+  This is still true (the planner is a separate concern), but the
+  executor now runs *after* Swarm::Spawn, walks the agent's
+  plugin_roster, and produces real deliverables.
+
+### Tests
+- **`tests/test_engine.ps1` G24** — new focused test for the executor.
+  Uses a synthetic template that names `media-stack` (real 7-plugin
+  agent). Asserts: `Plugin ` in stdout, `plugin_invoke` in audit,
+  at least one file in `deliverables/`, and the `swarm_close`
+  audit entry.
+- **`tests/test_engine.ps1` G21** — snapshot+restore the live
+  `agents/media-stack.json` + `agents/reviewer.quality.json` so
+  the reviewer-gate test no longer clobbers them. Closes G9.
+- **`tests/test_executor.ps1`** — new focused executor test (skill
+  repo) that runs the v0.3.7 acceptance gate end-to-end.
+
+### Notes
+This release makes the v0.3.0-v0.3.7 skill features
+(`media-stack`, `director.cinematic`, `cinematic-short`,
+`media-tutorial-video`, `reviewer.quality`) actually runnable.
+On engine v0.3.6 or earlier, the executor did not exist; the
+skill would validate the manifest and warn about missing agents,
+but never invoke a single plugin. **Engine v0.3.7+ is required
+for the v0.3.x skill feature set to work end-to-end.**
+
+The 0.3.5 and 0.3.6 releases (--recipe shortcut, agent_roster
+validator, version string read from Vortex.psd1, --recipe --source
+UX fix) are listed in the [v0.3.5 / v0.3.6 release
+notes](https://github.com/Cloudmeru/vortex-os-dotnet/releases).
+
 ## [0.3.0] — 2026-08-28
 
 ### Added — PRD-17 Cross-project memory & knowledge

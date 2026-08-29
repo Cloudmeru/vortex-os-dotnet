@@ -965,12 +965,107 @@ Write-Output '===END==='
 }
 "@
     Set-Content -LiteralPath (Join-Path $swarmDir 'plan.json') -Value $planBody -Encoding UTF8
-    # Make a minimal agent manifest for media-stack + reviewer.quality so the gate doesn't warn about missing
+    # v0.3.7: snapshot the live agent manifests so we can restore them after
+    # the test. The previous version of this test wrote 1-line stubs to
+    # agents\media-stack.json and agents\reviewer.quality.json and never
+    # restored them -- which clobbered the real agent manifests every time
+    # the test ran. Closes G9.
+    $mediaStackBackup  = Join-Path $scratchHome 'media-stack.json.bak'
+    $reviewerQBackup   = Join-Path $scratchHome 'reviewer.quality.json.bak'
+    if (Test-Path (Join-Path $skillRoot 'agents\media-stack.json')) {
+        Copy-Item (Join-Path $skillRoot 'agents\media-stack.json') $mediaStackBackup
+    }
+    if (Test-Path (Join-Path $skillRoot 'agents\reviewer.quality.json')) {
+        Copy-Item (Join-Path $skillRoot 'agents\reviewer.quality.json') $reviewerQBackup
+    }
     Set-Content -LiteralPath (Join-Path $skillRoot 'agents\media-stack.json') -Value '{"name":"media-stack","version":"0.2.0","kind":"dynamic","tier":3}' -Encoding UTF8
     Set-Content -LiteralPath (Join-Path $skillRoot 'agents\reviewer.quality.json') -Value '{"name":"reviewer.quality","version":"0.1.0","kind":"dynamic","tier":2}' -Encoding UTF8
-    $pkgOut = (& pwsh -NoProfile -File $skillPath --package $swarmId 2>&1 | Out-String)
-    Check "G21: --package prints the Reviewer gate line" { $pkgOut -match 'Reviewer gate: reviewer.quality' -or $pkgOut -match 'REVIEWER_INVOKE' }
-    Check "G21: --package completes" { $LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 2 }
+    try {
+        $pkgOut = (& pwsh -NoProfile -File $skillPath --package $swarmId 2>&1 | Out-String)
+        Check "G21: --package prints the Reviewer gate line" { $pkgOut -match 'Reviewer gate: reviewer.quality' -or $pkgOut -match 'REVIEWER_INVOKE' }
+        Check "G21: --package completes" { $LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 2 }
+    } finally {
+        # Restore the live manifests (or remove the stub if there was no
+        # original).
+        if (Test-Path $mediaStackBackup) {
+            Copy-Item $mediaStackBackup (Join-Path $skillRoot 'agents\media-stack.json') -Force
+        } else {
+            Remove-Item -LiteralPath (Join-Path $skillRoot 'agents\media-stack.json') -Force -ErrorAction SilentlyContinue
+        }
+        if (Test-Path $reviewerQBackup) {
+            Copy-Item $reviewerQBackup (Join-Path $skillRoot 'agents\reviewer.quality.json') -Force
+        } else {
+            Remove-Item -LiteralPath (Join-Path $skillRoot 'agents\reviewer.quality.json') -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # -----------------------------------------------------------------------
+    # G24: CmdDispatchAgentRoster walks the agent's plugin_roster
+    # (v0.3.7 - closes G1+G2+G3+G4)
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[24] CmdDispatchAgentRoster walks the agent's plugin_roster"
+
+    # Snapshot the live media-stack.json in case the test mutates it.
+    $liveMediaStack = Join-Path $skillRoot 'agents\media-stack.json'
+    $mediaStackBackup24 = Join-Path $scratchHome 'media-stack.json.bak24'
+    if (Test-Path $liveMediaStack) { Copy-Item $liveMediaStack $mediaStackBackup24 }
+
+    # Create a synthetic template that names media-stack in agent_roster.
+    $rosterTemplate = Join-Path $swarmsDir 'executor_smoke.json'
+    $rosterBody = @'
+{
+  "name": "executor_smoke",
+  "version": "0.0.0",
+  "objective_template": "smoke executor test",
+  "substitutions": {},
+  "deliverables": [],
+  "hitl_gates": [],
+  "self_heal_targets": [],
+  "agent_roster": ["media-stack"]
+}
+'@
+    Set-Content -LiteralPath $rosterTemplate -Value $rosterBody -Encoding UTF8
+
+    # Snapshot state before dispatch.
+    $delivDir = Join-Path $scratchHome 'deliverables'
+    $delivBefore = (Get-ChildItem -Recurse -ErrorAction SilentlyContinue $delivDir | Measure-Object).Count
+    $auditFile = Join-Path $scratchHome 'memory\audit.jsonl'
+    $auditBefore = if (Test-Path $auditFile) { (Get-Content $auditFile).Count } else { 0 }
+
+    # Run the dispatch. With the v0.3.7 fix, this should walk media-stack's
+    # 7-plugin roster and produce at least one file under deliverables/.
+    # Without the fix, plan.json is empty and nothing happens.
+    $rosterOut = (& pwsh -NoProfile -File $skillPath --dispatch-template $rosterTemplate 2>&1 | Out-String)
+
+    $delivAfter = (Get-ChildItem -Recurse -ErrorAction SilentlyContinue $delivDir | Measure-Object).Count
+    $auditAfter = if (Test-Path $auditFile) { (Get-Content $auditFile).Count } else { 0 }
+
+    Check "G24: --dispatch-template invokes at least one plugin" {
+        # After the fix: a `plugin_invoke` audit entry was emitted (audit
+        # log grew) OR the engine printed a "Plugin <name>" line.
+        $rosterOut -match 'Plugin ' -or $rosterOut -match 'plugin_invoke' -or ($auditAfter -gt $auditBefore)
+    }
+    Check "G24: --dispatch-template produces at least one deliverable" {
+        $delivAfter -gt $delivBefore
+    }
+    Check "G24: --dispatch-template does NOT just write an empty plan.json" {
+        # Before the fix: Swarm::Spawn wrote {"tasks":[]}; the "Wrote
+        # rendered objective" line was the only "success" signal. After
+        # the fix, the executor actually does work.
+        $planFile = Get-ChildItem -Recurse -ErrorAction SilentlyContinue -Filter 'plan.json' $swarmsDir | Select-Object -First 1
+        if ($planFile) {
+            $planContent = Get-Content $planFile.FullName -Raw
+            # After the fix, plan.json should be either missing OR
+            # contain at least one task entry (not just "tasks":[]).
+            -not ($planContent -match '"tasks"\s*:\s*\[\s*\]')
+        } else { $true }
+    }
+
+    # Restore the live media-stack.json
+    if (Test-Path $mediaStackBackup24) {
+        Copy-Item $mediaStackBackup24 $liveMediaStack -Force
+    }
 
     # -----------------------------------------------------------------------
     # Summary

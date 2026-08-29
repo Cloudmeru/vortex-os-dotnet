@@ -53,6 +53,10 @@ static int CmdDispatchMaster(Paths^ p, String^ objectiveFile) {
     return DispatchV4::Run(p, "master_objective", "supervisor.store", objectiveFile);
 }
 
+// Forward decl -- defined below. The agent executor is the v0.3.7 fix
+// for G1+G2+G3+G4 (the "validates but doesn't execute" gap).
+static int CmdDispatchAgentRoster(Paths^ p, String^ templatePath, String^ taskId);
+
 // Replay a saved Golden Path workflow template
 static int CmdDispatchTemplate(Paths^ p, String^ templateFile, int episodeNumber,
                                array<String^>^ overrides, String^ taskId) {
@@ -93,7 +97,192 @@ static int CmdDispatchTemplate(Paths^ p, String^ templateFile, int episodeNumber
         ConsoleX::Warn("Template validation skipped: " + ex->Message);
     }
     Console::WriteLine();
-    return Template::Run(p, templateFile, episodeNumber, overrides, taskId);
+    int rc = Template::Run(p, templateFile, episodeNumber, overrides, taskId);
+    if (rc != 0) return rc;
+    // v0.3.7 (G1+G2+G3+G4): after Template::Run writes the rendered
+    // objective and returns, walk the template's agent_roster and
+    // actually invoke each plugin. Pre-v0.3.7 the engine wrote
+    // {"tasks":[]} to plan.json and exited; v0.3.5 added the roster
+    // validator above but never wired the executor. This is the
+    // missing piece that makes the v0.3.x feature set (media-stack,
+    // director.cinematic, reviewer.quality) actually runnable.
+    String^ actualTaskId = String::IsNullOrEmpty(taskId)
+        ? "golden_path_" + ((long)(DateTime::UtcNow - DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind::Utc)).TotalSeconds).ToString()
+        : taskId;
+    return CmdDispatchAgentRoster(p, templateFile, actualTaskId);
+}
+
+// v0.3.7 (G1+G2+G3+G4): walk the template's agent_roster, load each
+// named agent's manifest, invoke each plugin in the agent's
+// plugin_roster via Plugin::Invoke, and copy the plugin's output file
+// into the durable deliverables/<project>/ directory.
+//
+// This is the executor that was missing from the v0.3.0-v0.3.6 engine.
+// pre-v0.3.7 the engine validated the roster (v0.3.5) but never walked
+// it; this function is the actual plugin dispatcher. The flow:
+//
+//   1. Read the template; pull the agent_roster array (empty -> warn+exit 0)
+//   2. For each agent name in the roster:
+//      a. Load <AgentsDir>/<name>.json
+//      b. Pull the plugin_roster array (empty -> warn+continue)
+//      c. For each entry (object {plugin, ...} OR string):
+//         - Build a minimal input JSON {agent, project, objective_ref}
+//         - Plugin::Invoke sets VORTEX_PLUGIN_* env vars and spawns pwsh
+//         - The plugin writes its output file to deliverables/<project>/
+//         - Plugin::Invoke audits the call (so the audit log shows plugin_invoke)
+//         - We copy the output file into our project deliverables dir
+//   3. Emit a swarm_close audit entry
+//
+// The function is best-effort: a single failed plugin does NOT stop the
+// walk. We return 0 unless the template itself is unreadable, so a
+// dispatch with N-1 working plugins and 1 broken one still produces the
+// N-1 deliverables.
+static int CmdDispatchAgentRoster(Paths^ p, String^ templatePath, String^ taskId) {
+    // 1. Read the template.
+    JsonDocument^ tdoc = JsonX::ReadFile(templatePath);
+    if (tdoc == nullptr) {
+        ConsoleX::Warn("CmdDispatchAgentRoster: could not read template " + templatePath);
+        return 1;
+    }
+    JsonElement troot = tdoc->RootElement;
+
+    // 2. Pull agent_roster.
+    JsonElement rosterEl = JsonX::GetProp(troot, "agent_roster");
+    if (rosterEl.ValueKind != JsonValueKind::Array) {
+        ConsoleX::Warn("Template has no agent_roster; nothing to execute");
+        return 0;
+    }
+
+    String^ project = String::IsNullOrEmpty(p->ProjectName) ? "_unfiled" : p->ProjectName;
+    String^ destDir = String::IsNullOrEmpty(p->ProjectName)
+        ? p->DeliverablesDir
+        : p->ProjectDeliverablesDir;
+    Directory::CreateDirectory(destDir);
+
+    ConsoleX::Step("Agent executor: walking roster for task " + taskId);
+
+    int totalPlugins = 0;
+    int totalOk = 0;
+    int totalDelivs = 0;
+
+    // 3. For each agent in the roster.
+    for each (JsonElement agEl in rosterEl.EnumerateArray()) {
+        String^ agentName = agEl.GetString();
+        if (String::IsNullOrEmpty(agentName)) continue;
+
+        String^ manifestPath = Path::Combine(p->AgentsDir, agentName + ".json");
+        if (!File::Exists(manifestPath)) {
+            ConsoleX::Warn("executor: agent '" + agentName + "' manifest missing at " + manifestPath);
+            continue;
+        }
+        JsonDocument^ adoc = JsonX::ReadFile(manifestPath);
+        if (adoc == nullptr) {
+            ConsoleX::Warn("executor: agent '" + agentName + "' manifest unreadable");
+            continue;
+        }
+        JsonElement aroot = adoc->RootElement;
+
+        // 4. For each entry in the agent's plugin_roster.
+        JsonElement pluginRoster = JsonX::GetProp(aroot, "plugin_roster");
+        if (pluginRoster.ValueKind != JsonValueKind::Array) {
+            ConsoleX::Warn("executor: agent '" + agentName + "' has no plugin_roster");
+            continue;
+        }
+
+        for each (JsonElement pEntry in pluginRoster.EnumerateArray()) {
+            String^ pluginName = nullptr;
+            if (pEntry.ValueKind == JsonValueKind::Object) {
+                pluginName = JsonX::GetStrOr(pEntry, "plugin", "");
+            } else if (pEntry.ValueKind == JsonValueKind::String) {
+                pluginName = pEntry.GetString();
+            }
+            if (String::IsNullOrEmpty(pluginName)) continue;
+
+            totalPlugins++;
+            ConsoleX::Step("Plugin " + pluginName + " (" + totalPlugins + ") for agent " + agentName);
+
+            // 5. Build the per-plugin input. We pass the agent name, the
+            // project slug, and the rendered objective reference so the
+            // plugin can build any project-scoped input it needs.
+            String^ inputs =
+                "{"
+                "\"agent\":\"" + JsonX::EscapeJson(agentName) + "\","
+                "\"project\":\"" + JsonX::EscapeJson(project) + "\","
+                "\"objective_ref\":\"" + JsonX::EscapeJson(taskId) + "\","
+                "\"template\":\"" + JsonX::EscapeJson(templatePath) + "\""
+                "}";
+            JsonDocument^ inputsDoc = nullptr;
+            try { inputsDoc = JsonDocument::Parse(inputs); }
+            catch (Exception^ ex) {
+                ConsoleX::Warn("executor: failed to build input JSON for " + pluginName + ": " + ex->Message);
+                continue;
+            }
+            if (inputsDoc == nullptr) continue;
+
+            // 6. Invoke the plugin. Plugin::Invoke sets VORTEX_PLUGIN_*
+            // env vars (so the plugin can find its input/output paths),
+            // spawns pwsh, captures stdout/stderr, audits via
+            // Audit::Emit("plugin_invoke"), and returns the output JSON
+            // string the plugin wrote to VORTEX_PLUGIN_OUTPUTS.
+            String^ outputJson = Plugin::Invoke(p, pluginName, inputsDoc->RootElement, 120);
+            if (String::IsNullOrEmpty(outputJson)) {
+                ConsoleX::Warn("Plugin " + pluginName + " returned no output");
+                continue;
+            }
+            totalOk++;
+
+            // 7. Parse the plugin's output and copy the file to the
+            // durable deliverables/<project>/ dir. The plugin is
+            // expected to write { file: <abs path>, ... } to its output
+            // JSON.
+            JsonDocument^ outDoc = nullptr;
+            try { outDoc = JsonDocument::Parse(outputJson); }
+            catch (Exception^) { outDoc = nullptr; }
+            if (outDoc == nullptr) {
+                ConsoleX::Warn("Plugin " + pluginName + " returned non-JSON output");
+                continue;
+            }
+            String^ outFile = JsonX::GetStrOr(outDoc->RootElement, "file", "");
+            if (!String::IsNullOrEmpty(outFile) && File::Exists(outFile)) {
+                String^ destFile = Path::Combine(destDir, Path::GetFileName(outFile));
+                try {
+                    File::Copy(outFile, destFile, true);
+                    totalDelivs++;
+                    ConsoleX::Ok("Plugin " + pluginName + " -> " + destFile);
+                } catch (Exception^ ex) {
+                    ConsoleX::Warn("Plugin " + pluginName + " -> copy failed: " + ex->Message);
+                }
+            } else {
+                ConsoleX::Ok("Plugin " + pluginName + " -> ok (no file output)");
+            }
+        }
+    }
+
+    ConsoleX::Ok("Agent executor: " + totalPlugins + " plugin(s) invoked, " +
+                 totalOk + " ok, " + totalDelivs + " file(s) delivered to " + destDir);
+
+    // 8. Audit the close so the operator can see how many plugins ran.
+    Audit::Emit(
+        p,
+        "T2",
+        "agent.executor",
+        "swarm_close",
+        "ok",
+        p->ProjectName,
+        taskId,
+        "LOW",
+        "",
+        "",
+        "",
+        gcnew array<String^> {
+            "plugins_invoked", totalPlugins.ToString(),
+            "plugins_ok", totalOk.ToString(),
+            "deliverables", totalDelivs.ToString()
+        },
+        0
+    );
+
+    return 0;
 }
 
 // Package one swarm's intermediate deliverables into the project's durable dir.
