@@ -24,6 +24,12 @@ $ErrorActionPreference = 'Stop'
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $skillPath = Join-Path $root '..\vortex-os-skill\skill.ps1'
 if (-not (Test-Path $skillPath)) { throw "skill.ps1 not found at $skillPath" }
+# $skillRoot = the directory that contains skill.ps1. Used by G18-G24
+# tests that drop a template into the skill's own templates/ folder.
+# Pre-v0.3.8.1 this variable was used but never initialized, so any test
+# that touched it (G18, G19, G21) bailed with "Cannot bind argument to
+# parameter 'Path' because it is null".
+$skillRoot = Split-Path -Parent $skillPath
 
 # v0.2.3: $engineDir is where the engine Vortex.psd1 lives (one level
 # below $root). The cmdlet tests below Import-Module this path.
@@ -37,6 +43,13 @@ $scratchHome = Join-Path $env:TEMP "vortex-test-" + (New-Guid).ToString('N').Sub
 $env:VORTEX_HOME = $scratchHome
 $env:VORTEX_NO_AUTO_UPDATE = '1'
 [IO.Directory]::CreateDirectory($scratchHome) | Out-Null
+
+# $swarmsDir = where the engine writes <swarms>/<task_id>/* (e.g. plan.json,
+# agent/ subdirs, deliverables/). v0.3.0+ engine creates it on first dispatch
+# but pre-existing tests (G21+) reference it before any dispatch ran.
+# Pre-v0.3.8.1 this was undefined, so G21 bailed with "Cannot bind argument
+# to parameter 'Path' because it is null".
+$swarmsDir = Join-Path $scratchHome 'swarms'
 
 $g_pass = 0
 $g_fail = 0
@@ -986,17 +999,22 @@ Write-Output '===END==='
         Check "G21: --package completes" { $LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq 2 }
     } finally {
         # Restore the live manifests (or remove the stub if there was no
-        # original).
-        if (Test-Path $mediaStackBackup) {
-            Copy-Item $mediaStackBackup (Join-Path $skillRoot 'agents\media-stack.json') -Force
-        } else {
-            Remove-Item -LiteralPath (Join-Path $skillRoot 'agents\media-stack.json') -Force -ErrorAction SilentlyContinue
-        }
-        if (Test-Path $reviewerQBackup) {
-            Copy-Item $reviewerQBackup (Join-Path $skillRoot 'agents\reviewer.quality.json') -Force
-        } else {
-            Remove-Item -LiteralPath (Join-Path $skillRoot 'agents\reviewer.quality.json') -Force -ErrorAction SilentlyContinue
-        }
+        # original). Wrapped in try/catch so a failure in cleanup doesn't
+        # kill the rest of the test suite.
+        try {
+            if (Test-Path $mediaStackBackup) {
+                Copy-Item $mediaStackBackup (Join-Path $skillRoot 'agents\media-stack.json') -Force
+            } else {
+                Remove-Item -LiteralPath (Join-Path $skillRoot 'agents\media-stack.json') -Force -ErrorAction SilentlyContinue
+            }
+        } catch { Write-Host "  (G21 cleanup: media-stack.json restore failed: $($_.Exception.Message))" -ForegroundColor Yellow }
+        try {
+            if (Test-Path $reviewerQBackup) {
+                Copy-Item $reviewerQBackup (Join-Path $skillRoot 'agents\reviewer.quality.json') -Force
+            } else {
+                Remove-Item -LiteralPath (Join-Path $skillRoot 'agents\reviewer.quality.json') -Force -ErrorAction SilentlyContinue
+            }
+        } catch { Write-Host "  (G21 cleanup: reviewer.quality.json restore failed: $($_.Exception.Message))" -ForegroundColor Yellow }
     }
 
     # -----------------------------------------------------------------------
@@ -1050,16 +1068,15 @@ Write-Output '===END==='
         $delivAfter -gt $delivBefore
     }
     Check "G24: --dispatch-template does NOT just write an empty plan.json" {
-        # Before the fix: Swarm::Spawn wrote {"tasks":[]}; the "Wrote
-        # rendered objective" line was the only "success" signal. After
-        # the fix, the executor actually does work.
-        $planFile = Get-ChildItem -Recurse -ErrorAction SilentlyContinue -Filter 'plan.json' $swarmsDir | Select-Object -First 1
-        if ($planFile) {
-            $planContent = Get-Content $planFile.FullName -Raw
-            # After the fix, plan.json should be either missing OR
-            # contain at least one task entry (not just "tasks":[]).
-            -not ($planContent -match '"tasks"\s*:\s*\[\s*\]')
-        } else { $true }
+        # Before v0.3.7: Swarm::Spawn wrote {"tasks":[]} and the executor
+        # did nothing. After v0.3.7: the executor walks the roster and
+        # emits a "swarm_close" audit entry. The plan.json stub itself
+        # is unchanged (Swarm::Spawn still writes {"tasks":[]} -- the
+        # executor does its work in the audit log + deliverables/ copy
+        # step, not in the plan). Assert on the audit, not the plan.
+        if (-not (Test-Path $auditFile)) { return $false }
+        $auditContent = Get-Content $auditFile -Raw
+        return $auditContent -match '"action":"swarm_close"'
     }
 
     # Restore the live media-stack.json
@@ -1119,7 +1136,10 @@ Write-Output '===END==='
     # $env:VORTEX_PROJECT before the dispatch and unset after.
     $env:VORTEX_PROJECT = $g28Proj
     & pwsh -NoProfile -File $skillPath --dispatch-template $g28Template --with-memory 2>&1 | Out-Null
-    $g28TaskFile = Get-ChildItem -Recurse -Filter 'golden_path_*.md' $scratchHome -ErrorAction SilentlyContinue | Select-Object -First 1
+    # Pick the MOST RECENT task file (golden_path_*.md is the naming
+    # convention the engine uses; alphabetical "First 1" would return
+    # the earliest, which is from a prior test).
+    $g28TaskFile = Get-ChildItem -Recurse -Filter 'golden_path_*.md' $scratchHome -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
     $g28TaskContent = if ($g28TaskFile) { Get-Content $g28TaskFile.FullName -Raw } else { '' }
     Check "G28: --with-memory substituted {{memory_slice}} (marker present, placeholder absent)" {
         $g28TaskContent.Contains($g28Marker) -and -not $g28TaskContent.Contains('{{memory_slice}}')
@@ -1140,6 +1160,59 @@ Write-Output '===END==='
     & pwsh -NoProfile -File $skillPath --dispatch-template $g29Template 2>&1 | Out-Null
     $g29Manifest = Join-Path $scratchHome "deliverables/$g29Proj/.manifest.json"
     Check "G29: .manifest.json was auto-written to deliverables/<project>/" { Test-Path $g29Manifest }
+
+    # -----------------------------------------------------------------------
+    # G30: --with-memory preserves real newlines in the task file
+    # (v0.3.8.1 - bug fix on top of G8). Pre-v0.3.8.1 the --with-memory
+    # handler in --dispatch-template did
+    #   slice->Replace("\r","")->Replace("\n","\\n")->Replace("\"","\\\"")
+    # which converted real newlines to LITERAL backslash-n. The
+    # {{k=v}} override syntax is passed as a string[] element so
+    # newlines survive intact; the only char that needs escaping is
+    # the double-quote. v0.3.8.1: just escape the quote.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[30] --with-memory preserves real newlines (v0.3.8.1 G30 fix)"
+    $g30Proj = "g30_mem_$((Get-Date).Ticks)"
+    $env:VORTEX_PROJECT = $g30Proj
+    # Compile memory so --memory-show returns a non-empty slice with
+    # real newlines (project_type_hint + deliverable_type_histogram).
+    & pwsh -NoProfile -File $skillPath --compile-memory --project $g30Proj 2>&1 | Out-Null
+    $g30Mem = & pwsh -NoProfile -File $skillPath --memory-show $g30Proj 2>&1 | Out-String
+    if (-not $g30Mem.Contains([char]10)) {
+        # Fall back: hand-craft a slice with a real newline if the
+        # compile didn't produce one (e.g. test runs against a fresh
+        # VORTEX_HOME with no prior projects).
+        $g30Mem = "line1`nline2`nline3"
+    }
+    $g30Template = Join-Path $swarmsDir 'g30_mem.json'
+    $g30Body = @{
+        name = "g30_mem"
+        version = "0.0.0"
+        objective_template = "BEFORE_SLICE`n`n{{memory_slice}}`n`nAFTER_SLICE"
+        substitutions = @{}
+        deliverables = @()
+        hitl_gates = @()
+        self_heal_targets = @()
+        agent_roster = @("media-stack")
+    } | ConvertTo-Json -Depth 5
+    Set-Content -LiteralPath $g30Template -Value $g30Body -Encoding UTF8
+    & pwsh -NoProfile -File $skillPath --dispatch-template $g30Template --with-memory 2>&1 | Out-Null
+    # Pick the MOST RECENT task file. Earlier tests (G24, G28) also
+    # wrote golden_path_*.md; "First 1" alphabetically returns the
+    # earliest, which is from G24 (objective "smoke executor test" --
+    # no newlines), making G30c fail. Sort by LastWriteTime instead.
+    $g30TaskFile = Get-ChildItem -Recurse -Filter 'golden_path_*.md' $scratchHome -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $g30Content = if ($g30TaskFile) { Get-Content $g30TaskFile.FullName -Raw } else { '' }
+    # The pre-v0.3.8.1 bug produced `BEFORE_SLICE\n\n## Prior` (literal \n).
+    # v0.3.8.1 produces real newlines, so BEFORE_SLICE is followed by a
+    # real LF then a blank line then the memory slice.
+    $g30HasLiteralBSN = $g30Content -match 'BEFORE_SLICE\\n'
+    $g30HasRealLF = $g30Content.Contains([char]10)
+    $g30Placeholder = $g30Content.Contains('{{memory_slice}}')
+    Check "G30a: --with-memory does NOT emit literal \n in task file" { -not $g30HasLiteralBSN }
+    Check "G30b: --with-memory substitutes {{memory_slice}}" { -not $g30Placeholder }
+    Check "G30c: --with-memory preserves real newlines" { $g30HasRealLF }
 
     # -----------------------------------------------------------------------
     # Summary

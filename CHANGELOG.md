@@ -4,6 +4,72 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.8.1] — 2026-08-29
+
+### Fixed — `--with-memory` newline escape bug (G30)
+
+The v0.3.8 `--with-memory` flag worked, but the engine converted
+the memory slice's real newlines into literal `\n` text before
+substituting `{{memory_slice}}` into the rendered task file. The
+result was a single-line task file with the text `\n` instead of
+line breaks. Three regressions in `src/skill.cpp`:
+
+- **Pre-v0.3.8.1:** the `--with-memory` handler did
+  ```cpp
+  slice->Replace("\r", "")->Replace("\n", "\\n")->Replace("\"", "\\\"");
+  ```
+  to "escape for the `{{k=v}}` override syntax". BUG: the args
+  list is passed as a `string[]` element, so embedded newlines
+  survive intact without any escaping. The only char that actually
+  needed escaping was the double-quote.
+- **v0.3.8.1:** replaced the chain with
+  ```cpp
+  slice->Replace("\"", "\\\"");
+  ```
+  Newlines stay real. The task file renders correctly.
+- **Test:** `tests/test_engine.ps1` G30a-c (the standalone
+  `test-g30.ps1` in the workspace was the original repro and is
+  now superseded by the in-tree test).
+
+### Fixed — `test_engine.ps1` had two undefined variables (`$skillRoot`, `$swarmsDir`)
+
+Pre-v0.3.8.1, the test file referenced `$skillRoot` 14 times and
+`$swarmsDir` 8 times but never initialized them. G18, G19, G21
+bailed with `Cannot bind argument to parameter 'Path' because it
+is null` on the very first test in each block. v0.3.8.1 sets both
+variables at the top of the test (next to the existing
+`$skillPath` / `$scratchHome` setup) so the affected tests
+actually run.
+
+### Fixed — G21 cleanup didn't restore `media-stack.json` on failure
+
+The G21 reviewer-gate test mutates the skill's `agents/`
+manifests to stub content, then a `try/finally` restores them.
+Pre-v0.3.8.1 the `Copy-Item` in the finally block was uncaught,
+so a copy failure (locked file, transient I/O error) aborted the
+rest of the suite. v0.3.8.1 wraps the restore in a per-file
+`try/catch` that warns and continues.
+
+### Fixed — G24 plan.json check expected a stub the engine still writes
+
+Pre-v0.3.8.1: the G24 assertion was
+`-not ($planContent -match '"tasks"\s*:\s*\[\s*\]')` (i.e. the
+plan must NOT be empty). But `Swarm::Spawn` writes the stub
+`{"tasks":[]}` and the v0.3.7 executor doesn't overwrite it (its
+work is in the audit log + deliverables copy step, not the plan).
+v0.3.8.1: the assertion checks for the `swarm_close` audit entry
+the executor emits instead. This is the canonical proof the
+executor ran.
+
+### Fixed — G28, G30 picked the wrong `golden_path_*.md`
+
+Both tests used `Get-ChildItem ... | Select-Object -First 1` to
+find the rendered task file, but `First 1` returns the
+alphabetically-earliest file, not the most recent. After G24
+created `golden_path_<early>`, G28 and G30 picked it up instead
+of their own. v0.3.8.1: both tests now sort by `LastWriteTime`
+descending so the test's own task file is the one inspected.
+
 ## [0.3.8] — 2026-08-29
 
 ### Added — gap-closure round v0.3.8

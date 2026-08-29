@@ -1303,9 +1303,16 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         if (withMemory && !String::IsNullOrEmpty(p->ProjectName)) {
             String^ slice = Vortex::Memory::ReadForInjection(p, p->ProjectName);
             if (!String::IsNullOrEmpty(slice)) {
-                // Escape any newlines / quotes that would break the
-                // {{k=v}} override syntax.
-                slice = slice->Replace("\r", "")->Replace("\n", "\\n")->Replace("\"", "\\\"");
+                // v0.3.8.1: the pre-v0.3.8.1 code did
+                //   slice->Replace("\r","")->Replace("\n","\\n")->Replace("\"","\\\"")
+                // to escape for the {{k=v}} override syntax. BUG: the args
+                // list is passed as a string[] element; embedded newlines
+                // survive intact, so the escape was unnecessary. Worse, it
+                // converted real newlines to LITERAL backslash-n, so the
+                // task file had the text `\n` instead of line breaks.
+                // Fix: just escape the double-quote (the only char that
+                // would break the {{k=v}} syntax). Newlines stay real.
+                slice = slice->Replace("\"", "\\\"");
                 overrides->Add("memory_slice=" + slice);
                 ConsoleX::Ok("with-memory: injected " + slice->Length + " chars of prior context for project " + p->ProjectName);
             } else {
