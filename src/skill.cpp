@@ -53,6 +53,20 @@ static int CmdDispatchMaster(Paths^ p, String^ objectiveFile) {
     return DispatchV4::Run(p, "master_objective", "supervisor.store", objectiveFile);
 }
 
+// Forward decl -- defined below. The agent executor is the v0.3.7 fix
+// for G1+G2+G3+G4 (the "validates but doesn't execute" gap).
+static int CmdDispatchAgentRoster(Paths^ p, String^ templatePath, String^ taskId);
+// Forward decl -- defined at line ~310 below. v0.3.8 (G12) calls it
+// after the executor walks the roster, to write the durable
+// .manifest.json automatically.
+static int CmdPackage(Paths^ p, String^ swarmId, bool dryRun);
+// v0.3.9: complete the v0.3.5 reviewer-gate write path. Reads the
+// template's agent_roster, finds the first agent with a
+// `reviewer.name` block in its manifest, and patches plan.json to
+// add `"reviewer":"<name>"` and `"agent_roster":[...]`. Defined at
+// line ~338 below (just before CmdPackage).
+static void PatchPlanJsonWithReviewer(Paths^ p, String^ templateFile, String^ swarmId);
+
 // Replay a saved Golden Path workflow template
 static int CmdDispatchTemplate(Paths^ p, String^ templateFile, int episodeNumber,
                                array<String^>^ overrides, String^ taskId) {
@@ -93,7 +107,326 @@ static int CmdDispatchTemplate(Paths^ p, String^ templateFile, int episodeNumber
         ConsoleX::Warn("Template validation skipped: " + ex->Message);
     }
     Console::WriteLine();
-    return Template::Run(p, templateFile, episodeNumber, overrides, taskId);
+    int rc = Template::Run(p, templateFile, episodeNumber, overrides, taskId);
+    if (rc != 0) return rc;
+    // v0.3.7 (G1+G2+G3+G4): after Template::Run writes the rendered
+    // objective and returns, walk the template's agent_roster and
+    // actually invoke each plugin. Pre-v0.3.7 the engine wrote
+    // {"tasks":[]} to plan.json and exited; v0.3.5 added the roster
+    // validator above but never wired the executor. This is the
+    // missing piece that makes the v0.3.x feature set (media-stack,
+    // director.cinematic, reviewer.quality) actually runnable.
+    String^ actualTaskId = String::IsNullOrEmpty(taskId)
+        ? "golden_path_" + ((long)(DateTime::UtcNow - DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind::Utc)).TotalSeconds).ToString()
+        : taskId;
+    int execRc = CmdDispatchAgentRoster(p, templateFile, actualTaskId);
+    if (execRc != 0) return execRc;
+    // v0.3.9: complete the v0.3.5 reviewer-gate wiring. v0.3.5 added
+    // the READ path in CmdPackage (plan.json.reviewer / plan.json
+    // .agent_roster -> "REVIEWER_INVOKE:" line) but never added the
+    // WRITE path -- Swarm::Spawn only writes
+    //   {"swarm_id":"...", "objective":"...", "tasks":[]}
+    // to plan.json. v0.3.9: after the executor runs, scan the
+    // template's agent_roster, look up each agent's manifest, find
+    // the first one with a `reviewer.name` block, and patch plan.json
+    // to add `"reviewer":"<name>"` (string) and `"agent_roster":[...]`
+    // (string array). CmdPackage's existing read path then picks
+    // them up unchanged.
+    try {
+        PatchPlanJsonWithReviewer(p, templateFile, actualTaskId);
+    } catch (Exception^ ex) {
+        ConsoleX::Warn("reviewer-gate patch skipped: " + ex->Message);
+    }
+    // v0.3.8 (G12): auto-package. Pre-v0.3.8 the operator had to
+    // manually run --package <swarm_id> after the dispatch to
+    // write the durable .manifest.json. v0.3.8: after the executor
+    // walks the roster, run CmdPackage which writes the manifest
+    // and stamps the durable copy. The operator can still call
+    // --package explicitly to re-package after editing the swarm
+    // dir; the auto-call is idempotent.
+    try {
+        // Packager::Package prepends "active_" internally, so pass the
+        // bare taskId (golden_path_<ts>), not "active_golden_path_<ts>".
+        CmdPackage(p, actualTaskId, false);
+    } catch (Exception^ ex) {
+        ConsoleX::Warn("auto-package skipped: " + ex->Message);
+    }
+    return 0;
+}
+
+// v0.3.7 (G1+G2+G3+G4): walk the template's agent_roster, load each
+// named agent's manifest, invoke each plugin in the agent's
+// plugin_roster via Plugin::Invoke, and copy the plugin's output file
+// into the durable deliverables/<project>/ directory.
+//
+// This is the executor that was missing from the v0.3.0-v0.3.6 engine.
+// pre-v0.3.7 the engine validated the roster (v0.3.5) but never walked
+// it; this function is the actual plugin dispatcher. The flow:
+//
+//   1. Read the template; pull the agent_roster array (empty -> warn+exit 0)
+//   2. For each agent name in the roster:
+//      a. Load <AgentsDir>/<name>.json
+//      b. Pull the plugin_roster array (empty -> warn+continue)
+//      c. For each entry (object {plugin, ...} OR string):
+//         - Build a minimal input JSON {agent, project, objective_ref}
+//         - Plugin::Invoke sets VORTEX_PLUGIN_* env vars and spawns pwsh
+//         - The plugin writes its output file to deliverables/<project>/
+//         - Plugin::Invoke audits the call (so the audit log shows plugin_invoke)
+//         - We copy the output file into our project deliverables dir
+//   3. Emit a swarm_close audit entry
+//
+// The function is best-effort: a single failed plugin does NOT stop the
+// walk. We return 0 unless the template itself is unreadable, so a
+// dispatch with N-1 working plugins and 1 broken one still produces the
+// N-1 deliverables.
+static int CmdDispatchAgentRoster(Paths^ p, String^ templatePath, String^ taskId) {
+    // 1. Read the template.
+    JsonDocument^ tdoc = JsonX::ReadFile(templatePath);
+    if (tdoc == nullptr) {
+        ConsoleX::Warn("CmdDispatchAgentRoster: could not read template " + templatePath);
+        return 1;
+    }
+    JsonElement troot = tdoc->RootElement;
+
+    // 2. Pull agent_roster.
+    JsonElement rosterEl = JsonX::GetProp(troot, "agent_roster");
+    if (rosterEl.ValueKind != JsonValueKind::Array) {
+        ConsoleX::Warn("Template has no agent_roster; nothing to execute");
+        return 0;
+    }
+
+    String^ project = String::IsNullOrEmpty(p->ProjectName) ? "_unfiled" : p->ProjectName;
+    String^ destDir = String::IsNullOrEmpty(p->ProjectName)
+        ? p->DeliverablesDir
+        : p->ProjectDeliverablesDir;
+    Directory::CreateDirectory(destDir);
+
+    ConsoleX::Step("Agent executor: walking roster for task " + taskId);
+
+    int totalPlugins = 0;
+    int totalOk = 0;
+    int totalDelivs = 0;
+
+    // 3. For each agent in the roster.
+    for each (JsonElement agEl in rosterEl.EnumerateArray()) {
+        String^ agentName = agEl.GetString();
+        if (String::IsNullOrEmpty(agentName)) continue;
+
+        String^ manifestPath = Path::Combine(p->AgentsDir, agentName + ".json");
+        if (!File::Exists(manifestPath)) {
+            ConsoleX::Warn("executor: agent '" + agentName + "' manifest missing at " + manifestPath);
+            continue;
+        }
+        JsonDocument^ adoc = JsonX::ReadFile(manifestPath);
+        if (adoc == nullptr) {
+            ConsoleX::Warn("executor: agent '" + agentName + "' manifest unreadable");
+            continue;
+        }
+        JsonElement aroot = adoc->RootElement;
+
+        // 4. For each entry in the agent's plugin_roster.
+        JsonElement pluginRoster = JsonX::GetProp(aroot, "plugin_roster");
+        if (pluginRoster.ValueKind != JsonValueKind::Array) {
+            ConsoleX::Warn("executor: agent '" + agentName + "' has no plugin_roster");
+            continue;
+        }
+
+        for each (JsonElement pEntry in pluginRoster.EnumerateArray()) {
+            String^ pluginName = nullptr;
+            if (pEntry.ValueKind == JsonValueKind::Object) {
+                pluginName = JsonX::GetStrOr(pEntry, "plugin", "");
+            } else if (pEntry.ValueKind == JsonValueKind::String) {
+                pluginName = pEntry.GetString();
+            }
+            if (String::IsNullOrEmpty(pluginName)) continue;
+
+            totalPlugins++;
+            ConsoleX::Step("Plugin " + pluginName + " (" + totalPlugins + ") for agent " + agentName);
+
+            // 5. Build the per-plugin input. We pass the agent name, the
+            // project slug, and the rendered objective reference so the
+            // plugin can build any project-scoped input it needs.
+            String^ inputs =
+                "{"
+                "\"agent\":\"" + JsonX::EscapeJson(agentName) + "\","
+                "\"project\":\"" + JsonX::EscapeJson(project) + "\","
+                "\"objective_ref\":\"" + JsonX::EscapeJson(taskId) + "\","
+                "\"template\":\"" + JsonX::EscapeJson(templatePath) + "\""
+                "}";
+            JsonDocument^ inputsDoc = nullptr;
+            try { inputsDoc = JsonDocument::Parse(inputs); }
+            catch (Exception^ ex) {
+                ConsoleX::Warn("executor: failed to build input JSON for " + pluginName + ": " + ex->Message);
+                continue;
+            }
+            if (inputsDoc == nullptr) continue;
+
+            // 6. Invoke the plugin. Plugin::Invoke sets VORTEX_PLUGIN_*
+            // env vars (so the plugin can find its input/output paths),
+            // spawns pwsh, captures stdout/stderr, audits via
+            // Audit::Emit("plugin_invoke"), and returns the output JSON
+            // string the plugin wrote to VORTEX_PLUGIN_OUTPUTS.
+            String^ outputJson = Plugin::Invoke(p, pluginName, inputsDoc->RootElement, 120);
+            if (String::IsNullOrEmpty(outputJson)) {
+                ConsoleX::Warn("Plugin " + pluginName + " returned no output");
+                continue;
+            }
+            totalOk++;
+
+            // 7. Parse the plugin's output and copy the file to the
+            // durable deliverables/<project>/ dir. The plugin is
+            // expected to write { file: <abs path>, ... } to its output
+            // JSON.
+            JsonDocument^ outDoc = nullptr;
+            try { outDoc = JsonDocument::Parse(outputJson); }
+            catch (Exception^) { outDoc = nullptr; }
+            if (outDoc == nullptr) {
+                ConsoleX::Warn("Plugin " + pluginName + " returned non-JSON output");
+                continue;
+            }
+            String^ outFile = JsonX::GetStrOr(outDoc->RootElement, "file", "");
+            if (!String::IsNullOrEmpty(outFile) && File::Exists(outFile)) {
+                String^ destFile = Path::Combine(destDir, Path::GetFileName(outFile));
+                try {
+                    File::Copy(outFile, destFile, true);
+                    totalDelivs++;
+                    ConsoleX::Ok("Plugin " + pluginName + " -> " + destFile);
+                } catch (Exception^ ex) {
+                    ConsoleX::Warn("Plugin " + pluginName + " -> copy failed: " + ex->Message);
+                }
+            } else {
+                ConsoleX::Ok("Plugin " + pluginName + " -> ok (no file output)");
+            }
+        }
+    }
+
+    ConsoleX::Ok("Agent executor: " + totalPlugins + " plugin(s) invoked, " +
+                 totalOk + " ok, " + totalDelivs + " file(s) delivered to " + destDir);
+
+    // v0.3.8 (G11): cost tracking for the executor path. Pre-v0.3.8,
+    // only DispatchV4::Run called CostTracker::RecordTokens (with 0/0
+    // tokens because the V4 path is a stub). v0.3.8's executor runs
+    // real plugins, so we record a per-dispatch cost entry even when
+    // the token count is 0. This makes the cost_log.jsonl reflect
+    // every dispatch, not just ones that went through --with-memory.
+    // The budget check then sees the cumulative spend (default
+    // 1M tokens per v0.3.8 G14) and alerts if a runaway loop blows it.
+    array<String^>^ costTags = gcnew array<String^> {
+        "executor", "plugins=" + totalPlugins.ToString(),
+        "deliverables=" + totalDelivs.ToString()
+    };
+    CostTracker::RecordTokens(p, taskId, "agent.executor", project,
+                              "plugin-executor", 0, 0, 0, costTags);
+    CostTracker::CheckBudget(p, project, taskId);
+
+    // 8. Audit the close so the operator can see how many plugins ran.
+    Audit::Emit(
+        p,
+        "T2",
+        "agent.executor",
+        "swarm_close",
+        "ok",
+        p->ProjectName,
+        taskId,
+        "LOW",
+        "",
+        "",
+        "",
+        gcnew array<String^> {
+            "plugins_invoked", totalPlugins.ToString(),
+            "plugins_ok", totalOk.ToString(),
+            "deliverables", totalDelivs.ToString()
+        },
+        0
+    );
+
+    return 0;
+}
+
+// v0.3.9: complete the v0.3.5 reviewer-gate write path. The v0.3.5
+// commit added the READ path in CmdPackage but never the WRITE path:
+// Swarm::Spawn writes only
+//   {"swarm_id":"...", "objective":"...", "tasks":[]}
+// to plan.json. v0.3.9: after the executor runs, scan the template's
+// agent_roster, look up each agent's manifest, find the first one
+// with a `reviewer.name` block, and patch plan.json to add
+//   "reviewer": "<name>"   (string)
+//   "agent_roster": [...]  (string array)
+// so the existing CmdPackage reader picks them up unchanged.
+//
+// The agent manifest's `reviewer` field is an object
+//   { "name": "reviewer.quality", "when_to_invoke": "...", ... }
+// so we read `agent.reviewer.name` and write it as a flat string to
+// plan.json. CmdPackage's reader does `GetStrOr(plan, "reviewer", "")`
+// which expects a string -- this keeps both sides in agreement.
+static void PatchPlanJsonWithReviewer(Paths^ p, String^ templateFile, String^ swarmId) {
+    if (String::IsNullOrEmpty(templateFile) || !File::Exists(templateFile)) return;
+    if (String::IsNullOrEmpty(swarmId)) return;
+    // Packager::Package prepends "active_" but CmdDispatchTemplate
+    // passes the bare taskId. Mirror the same convention here.
+    String^ planPath = Path::Combine(p->SwarmsDir, "active_" + swarmId, "plan.json");
+    if (!File::Exists(planPath)) return;
+
+    // 1. Read the template's agent_roster.
+    JsonDocument^ tdoc = JsonX::ReadFile(templateFile);
+    if (tdoc == nullptr) return;
+    JsonElement troot = tdoc->RootElement;
+    JsonElement rosterEl = JsonX::GetProp(troot, "agent_roster");
+    if (rosterEl.ValueKind != JsonValueKind::Array) return;
+    // 2. Walk the roster; for each named agent, look up its manifest
+    //    and try to extract `reviewer.name` (the v0.3.x manifest shape).
+    String^ reviewerName = nullptr;
+    List<String^>^ rosterNames = gcnew List<String^>();
+    for each (JsonElement ag in rosterEl.EnumerateArray()) {
+        String^ agName = ag.GetString();
+        if (String::IsNullOrEmpty(agName)) continue;
+        rosterNames->Add(agName);
+        if (reviewerName != nullptr) continue;
+        String^ manifestPath = Path::Combine(p->AgentsDir, agName + ".json");
+        if (!File::Exists(manifestPath)) continue;
+        JsonDocument^ adoc = JsonX::ReadFile(manifestPath);
+        if (adoc == nullptr) continue;
+        try {
+            // The agent manifest has `reviewer` as an object with a
+            // `name` field. The CmdPackage reader expects a string,
+            // so flatten to the name here.
+            JsonElement revEl = JsonX::GetProp(adoc->RootElement, "reviewer");
+            if (revEl.ValueKind == JsonValueKind::Object) {
+                JsonElement nameEl = JsonX::GetProp(revEl, "name");
+                if (nameEl.ValueKind == JsonValueKind::String) {
+                    reviewerName = nameEl.GetString();
+                }
+            } else if (revEl.ValueKind == JsonValueKind::String) {
+                // Defensive: accept a string reviewer too.
+                reviewerName = revEl.GetString();
+            }
+        } catch (Exception^) { /* ignore */ }
+    }
+    if (reviewerName == nullptr) return;  // No agent declared a reviewer; nothing to patch.
+
+    // 3. Patch plan.json: read it as a mutable JsonNode, add the
+    //    two fields, write back. Use JsonNode (mutable) instead of
+    //    JsonElement (read-only) so we can add properties in place.
+    //    JsonNode/JsonObject/JsonArray/JsonValue live in
+    //    System.Text.Json.Nodes (NOT the bare System namespace).
+    String^ planText = File::ReadAllText(planPath);
+    System::Text::Json::Nodes::JsonNode^ planNode = nullptr;
+    try {
+        planNode = System::Text::Json::Nodes::JsonNode::Parse(planText);
+    } catch (Exception^ ex) {
+        ConsoleX::Warn("reviewer-gate patch: plan.json is not valid JSON: " + ex->Message);
+        return;
+    }
+    System::Text::Json::Nodes::JsonObject^ planObj = planNode->AsObject();
+    planObj["reviewer"] = System::Text::Json::Nodes::JsonValue::Create(reviewerName);
+    System::Text::Json::Nodes::JsonArray^ rosterArr = gcnew System::Text::Json::Nodes::JsonArray();
+    for each (String ^ n in rosterNames) rosterArr->Add(System::Text::Json::Nodes::JsonValue::Create(n));
+    planObj["agent_roster"] = rosterArr;
+    JsonSerializerOptions^ opts = gcnew JsonSerializerOptions();
+    opts->WriteIndented = true;
+    File::WriteAllText(planPath, planNode->ToJsonString(opts));
+    ConsoleX::Ok("reviewer-gate: patched plan.json with reviewer='" + reviewerName +
+        "' (from agent manifest); agent_roster has " + rosterNames->Count + " entry(ies)");
 }
 
 // Package one swarm's intermediate deliverables into the project's durable dir.
@@ -1044,6 +1377,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         int ep = 1;
         String^ taskId = nullptr;
         List<String^>^ overrides = gcnew List<String^>();
+        bool withMemory = false;
         for (int i = 2; i < args->Length; i++) {
             String^ a = args[i];
             if (a == "--episode-number" && i + 1 < args->Length) {
@@ -1052,6 +1386,11 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
                 i++;
             } else if (a == "--task" && i + 1 < args->Length) {
                 taskId = args[i + 1]; i++;
+            } else if (a == "--with-memory") {
+                // v0.3.8 (G8): inject the project's prior-context memory slice
+                // into the rendered task as the {{memory_slice}} template var.
+                // Pre-v0.3.8 the flag was documented but never wired.
+                withMemory = true;
             } else if (a == "--template-var" && i + 1 < args->Length) {
                 overrides->Add(args[i + 1]); i++;
             } else if (a->StartsWith("--template-var=")) {
@@ -1063,6 +1402,29 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
                 else if (a->StartsWith("--setting="))     overrides->Add("setting=" + a->Substring(10));
                 else if (a->StartsWith("--diegetic-clock=")) overrides->Add("diegetic_clock=" + a->Substring(17));
                 else if (a->StartsWith("--episode-title=")) overrides->Add("episode_title=" + a->Substring(16));
+            }
+        }
+        // v0.3.8 (G8): resolve the memory slice and inject as a template var.
+        // If the project has no compiled memory, the slice is empty and the
+        // {{memory_slice}} placeholder in the template will be replaced with
+        // the empty string (a no-op for templates that don't reference it).
+        if (withMemory && !String::IsNullOrEmpty(p->ProjectName)) {
+            String^ slice = Vortex::Memory::ReadForInjection(p, p->ProjectName);
+            if (!String::IsNullOrEmpty(slice)) {
+                // v0.3.8.1: the pre-v0.3.8.1 code did
+                //   slice->Replace("\r","")->Replace("\n","\\n")->Replace("\"","\\\"")
+                // to escape for the {{k=v}} override syntax. BUG: the args
+                // list is passed as a string[] element; embedded newlines
+                // survive intact, so the escape was unnecessary. Worse, it
+                // converted real newlines to LITERAL backslash-n, so the
+                // task file had the text `\n` instead of line breaks.
+                // Fix: just escape the double-quote (the only char that
+                // would break the {{k=v}} syntax). Newlines stay real.
+                slice = slice->Replace("\"", "\\\"");
+                overrides->Add("memory_slice=" + slice);
+                ConsoleX::Ok("with-memory: injected " + slice->Length + " chars of prior context for project " + p->ProjectName);
+            } else {
+                ConsoleX::Warn("with-memory: no compiled memory slice for project " + p->ProjectName + " (run --compile-memory first)");
             }
         }
         return CmdDispatchTemplate(p, args[1], ep, overrides->ToArray(), taskId);
@@ -1106,7 +1468,15 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
                 forwarded->Add(a);
             }
         }
-        return Vortex::Skill::Run(args[0], forwarded->ToArray());
+        // v0.3.7: pass p->SkillDir, NOT args[0]. args[0] is the recipe
+        // name (e.g. "media-tutorial-video"), not a path. The pre-v0.3.7
+        // --recipe code passed args[0] anyway, but it didn't matter
+        // because the executor (CmdDispatchAgentRoster) didn't exist
+        // and nothing read agents/<name>.json. v0.3.7's executor reads
+        // agents from <SkillDir>/agents/, so the wrong SkillDir (the
+        // recipe name string) makes every agent_roster walk produce 0
+        // matches. Fix: pass the resolved skill dir.
+        return Vortex::Skill::Run(p->SkillDir, forwarded->ToArray());
     }
     if (cmd == "--package") {
         if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --package <swarm_id> [--dry-run]"); return 2; }

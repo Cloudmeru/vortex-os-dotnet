@@ -195,7 +195,7 @@ namespace Vortex {
         }
         if (usdTotal > 0 || tokensTotal > 0) return;
 
-        // 3. Global defaults
+        // 3. Global defaults (budgets.json under .vortex/)
         String^ f = BudgetsFile(p);
         if (File::Exists(f)) {
             JsonDocument^ doc = JsonX::ReadFile(f);
@@ -206,6 +206,19 @@ namespace Vortex {
                 if (tokEl.ValueKind == JsonValueKind::Number) tokensTotal = tokEl.GetInt64();
             }
         }
+        if (usdTotal > 0 || tokensTotal > 0) return;
+
+        // 4. v0.3.8 (G14): sane engine default. Pre-v0.3.8, a project with
+        // no budget configured had usdTotal=0 and CheckBudget bailed
+        // out (no enforcement). Now: every project gets a default
+        // 1,000,000 tokens / $5.00 budget unless the operator explicitly
+        // overrides via env / project _meta / global budgets.json. The
+        // default is high enough that ordinary dispatches never hit it
+        // accidentally, but low enough that runaway loops are caught.
+        // The default is engine-internal (not written to budgets.json)
+        // so a user can later set their own budget and override cleanly.
+        tokensTotal = 1000000;
+        usdTotal    = 5.0;
     }
 
     // -------------------------------------------------------------------------

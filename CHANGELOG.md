@@ -4,6 +4,285 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.9] — 2026-08-29
+
+### Added — Reviewer-gate write path (completes the v0.3.5 half-feature)
+
+The v0.3.5 engine added the *read* path in `CmdPackage`
+(`plan.json.reviewer` + `plan.json.agent_roster` -> the
+"Reviewer gate: <name>" log line + "REVIEWER_INVOKE:" operator
+hint), but never added the *write* path. `Swarm::Spawn` only
+writes `{"swarm_id","objective","tasks":[]}` to plan.json, so
+the read path was inert for any real dispatch. The G21 test
+in the engine suite covered the read path by hand-crafting
+plan.json with the right fields.
+
+v0.3.9 closes the loop with `PatchPlanJsonWithReviewer` in
+`src/skill.cpp`:
+
+- After the executor (`CmdDispatchAgentRoster`) finishes, walk
+  the template's `agent_roster` array, look up each named
+  agent's manifest, and find the first one with a
+  `reviewer.name` block.
+- Parse plan.json as a `System.Text.Json.Nodes.JsonObject`
+  (mutable; `JsonElement` is read-only and can't add
+  properties), add `"reviewer":"<name>"` as a string and
+  `"agent_roster":[...]` as a string array, write back.
+- The agent manifest's `reviewer` field is an object
+  (`{"name":"reviewer.quality","when_to_invoke":"..."}`)
+  while `CmdPackage`'s reader expects a string
+  (`GetStrOr(plan, "reviewer", "")`). The patch flattens
+  `agent.reviewer.name` to a string at write time so both
+  sides agree.
+- Net effect: a real dispatch with `agent_roster:["media-stack"]`
+  now produces plan.json with `"reviewer":"reviewer.quality"`,
+  and `CmdPackage` emits the gate line and the operator hint
+  for free.
+
+Test: `tests/test_engine.ps1` G31a-c. G31a asserts the
+`reviewer` field is populated from the agent manifest. G31b
+asserts the `agent_roster` array is the flat string list
+`CmdPackage` expects. G31c asserts the patch preserves
+`Swarm::Spawn`'s original `swarm_id` and `tasks` fields
+(so we don't break the executor's downstream contract).
+
+### Fixed — `Swarm::Spawn` was writing invalid JSON to plan.json
+
+Pre-v0.3.9: `Swarm::Spawn` used `String::Format` to build
+plan.json with the raw `masterObjective` file path
+(`C:\Users\alber\...`). JSON strings require backslashes to
+be escaped as `\\`, so the result was invalid JSON:
+
+```json
+{"swarm_id":"...", "objective":"C:\Users\...", "tasks":[]}
+```
+
+Both the v0.3.5 reviewer-gate read path (`CmdPackage`) and
+the v0.3.9 write path (`PatchPlanJsonWithReviewer`) try to
+`JsonNode::Parse` plan.json, so the invalid JSON made both
+silently no-op. The first symptom was G31's "plan.json is
+not valid JSON: 'U' is an invalid escapable character" error.
+
+v0.3.9: replaced the `String::Format` with
+`JsonSerializer::Serialize` over a `Dictionary<String,Object>`.
+The framework serializer handles all the escaping.
+
+Test: implicit. G31a-c now read the same plan.json and
+find the patched fields, which they couldn't do when the
+file was unparsable.
+
+Builds: Vortex.dll 151 KB (up from 150 KB in v0.3.8.1).
+
+## [0.3.8.1] — 2026-08-29
+
+### Fixed — `--with-memory` newline escape bug (G30)
+
+The v0.3.8 `--with-memory` flag worked, but the engine converted
+the memory slice's real newlines into literal `\n` text before
+substituting `{{memory_slice}}` into the rendered task file. The
+result was a single-line task file with the text `\n` instead of
+line breaks. Three regressions in `src/skill.cpp`:
+
+- **Pre-v0.3.8.1:** the `--with-memory` handler did
+  ```cpp
+  slice->Replace("\r", "")->Replace("\n", "\\n")->Replace("\"", "\\\"");
+  ```
+  to "escape for the `{{k=v}}` override syntax". BUG: the args
+  list is passed as a `string[]` element, so embedded newlines
+  survive intact without any escaping. The only char that actually
+  needed escaping was the double-quote.
+- **v0.3.8.1:** replaced the chain with
+  ```cpp
+  slice->Replace("\"", "\\\"");
+  ```
+  Newlines stay real. The task file renders correctly.
+- **Test:** `tests/test_engine.ps1` G30a-c (the standalone
+  `test-g30.ps1` in the workspace was the original repro and is
+  now superseded by the in-tree test).
+
+### Fixed — `test_engine.ps1` had two undefined variables (`$skillRoot`, `$swarmsDir`)
+
+Pre-v0.3.8.1, the test file referenced `$skillRoot` 14 times and
+`$swarmsDir` 8 times but never initialized them. G18, G19, G21
+bailed with `Cannot bind argument to parameter 'Path' because it
+is null` on the very first test in each block. v0.3.8.1 sets both
+variables at the top of the test (next to the existing
+`$skillPath` / `$scratchHome` setup) so the affected tests
+actually run.
+
+### Fixed — G21 cleanup didn't restore `media-stack.json` on failure
+
+The G21 reviewer-gate test mutates the skill's `agents/`
+manifests to stub content, then a `try/finally` restores them.
+Pre-v0.3.8.1 the `Copy-Item` in the finally block was uncaught,
+so a copy failure (locked file, transient I/O error) aborted the
+rest of the suite. v0.3.8.1 wraps the restore in a per-file
+`try/catch` that warns and continues.
+
+### Fixed — G24 plan.json check expected a stub the engine still writes
+
+Pre-v0.3.8.1: the G24 assertion was
+`-not ($planContent -match '"tasks"\s*:\s*\[\s*\]')` (i.e. the
+plan must NOT be empty). But `Swarm::Spawn` writes the stub
+`{"tasks":[]}` and the v0.3.7 executor doesn't overwrite it (its
+work is in the audit log + deliverables copy step, not the plan).
+v0.3.8.1: the assertion checks for the `swarm_close` audit entry
+the executor emits instead. This is the canonical proof the
+executor ran.
+
+### Fixed — G28, G30 picked the wrong `golden_path_*.md`
+
+Both tests used `Get-ChildItem ... | Select-Object -First 1` to
+find the rendered task file, but `First 1` returns the
+alphabetically-earliest file, not the most recent. After G24
+created `golden_path_<early>`, G28 and G30 picked it up instead
+of their own. v0.3.8.1: both tests now sort by `LastWriteTime`
+descending so the test's own task file is the one inspected.
+
+## [0.3.8] — 2026-08-29
+
+### Added — gap-closure round v0.3.8
+
+This release closes 4 of the 5 remaining gaps from the v0.3.7
+gap analysis. The 5th (G6, Inspector LLM wiring) is deferred to
+v0.3.9+ because it requires mcode-tools LLM infra that is not
+available in the test env, and the APPROVED fallback is safe.
+
+**G14 (default budget) — `src/lib/CostTracker.cpp`:**
+- Pre-v0.3.8: `ResolveBudget` returned 0 if no env / project _meta /
+  global budgets.json was configured, so `CheckBudget` bailed out
+  silently and no project had enforcement.
+- v0.3.8: when the three existing sources are all 0, apply a sane
+  engine default of 1,000,000 tokens / $5.00. High enough that
+  ordinary dispatches never hit it accidentally, low enough that
+  runaway loops are caught. The default is engine-internal (not
+  written to budgets.json) so a user can later set their own
+  budget and override cleanly.
+- Test: `tests/test_engine.ps1` G26.
+
+**G11 (cost log on every dispatch) — `src/skill.cpp` CmdDispatchAgentRoster:**
+- Pre-v0.3.8: only `DispatchV4::Run` called `CostTracker::RecordTokens`,
+  and only with 0/0 tokens because V4 is a stub. The new
+  CmdDispatchAgentRoster (v0.3.7) didn't call RecordTokens, so
+  cost_log.jsonl stayed empty unless `--with-memory` triggered the
+  LLM path.
+- v0.3.8: CmdDispatchAgentRoster now calls RecordTokens with the
+  `plugin-executor` model and tags `[executor, plugins=N,
+  deliverables=M]`. CheckBudget then sees the cumulative spend
+  against the v0.3.8 default budget (G14) and alerts if a runaway
+  loop blows it.
+- Test: `tests/test_engine.ps1` G27.
+
+**G8 (--with-memory) — `src/skill.cpp` --dispatch-template branch:**
+- Pre-v0.3.8: the flag was documented in v0.3.0 (PRD-17) and the
+  function `Memory::ReadForInjection` was implemented, but no code
+  path injected the slice. The docstring lied.
+- v0.3.8: the --dispatch-template branch now recognizes `--with-memory`,
+  calls `Memory::ReadForInjection(p, p->ProjectName)`, and adds the
+  slice as a `memory_slice=<text>` template var. Templates that
+  include `{{memory_slice}}` get the prior-context drop-in.
+  Newlines and quotes in the slice are escaped so the
+  `key=value` override syntax stays valid.
+- Test: `tests/test_engine.ps1` G28.
+
+**G12 (auto-packager) — `src/skill.cpp` CmdDispatchTemplate:**
+- Pre-v0.3.8: after a dispatch, the operator had to manually run
+  `--package <swarm_id>` to write the durable `.manifest.json`.
+  Most operators forgot, so deliverables sat in `swarms/active_xxx/`
+  without an authoritative manifest.
+- v0.3.8: after the executor walks the roster, CmdDispatchTemplate
+  calls CmdPackage automatically. The call is wrapped in a
+  try/catch (a missing swarm dir logs a warning rather than
+  aborting the dispatch). The operator can still call --package
+  manually to re-package after editing the swarm dir; both paths
+  are idempotent.
+- Test: `tests/test_engine.ps1` G29.
+
+### Fixed
+- **G6 (Inspector LLM) — `src/lib/Inspector.cpp`:** rewrote the
+  pre-v0.3.8 comment that claimed "the bash version calls
+  query_native_coder which itself is a stub" to be explicit about
+  the v0.3.8 deferral. The LLM verdict is still hardcoded to
+  APPROVED. The Inspector only fires when tokens > 15000, which
+  the current dispatch paths don't cross (DispatchV4 is a stub
+  with 0 tokens; the v0.3.7 executor logs 0), and the test env
+  doesn't have mcode-tools. Wiring the LLM call is the first
+  item on the v0.3.9 list. The APPROVED default is safe (it
+  never halts the pipeline on its own).
+
+### Tests
+- `tests/test_engine.ps1` G26: --budget-show with no budget
+  configured returns a non-zero default.
+- `tests/test_engine.ps1` G27: --dispatch-template writes a
+  cost_log.jsonl entry (G11).
+- `tests/test_engine.ps1` G28: --with-memory injects the
+  {{memory_slice}} into the rendered task (G8).
+- `tests/test_engine.ps1` G29: --dispatch-template auto-writes
+  the .manifest.json (G12).
+
+### Notes
+This release is engine-only (no skill release needed). The skill
+v0.3.10 from the v0.3.7 arc continues to work with engine
+v0.3.8 without changes. The four v0.3.7 executor tests
+(G24.A-D in tests/test_executor.ps1) continue to pass.
+
+## [0.3.7] — 2026-08-29
+
+### Added — Agent executor (closes the "validates but doesn't execute" gap)
+- **`src/skill.cpp` — `CmdDispatchAgentRoster(Paths^, String^, String^)`.** This
+  is the executor that was missing from the v0.3.0-v0.3.6 engine. After
+  `Template::Run` writes the rendered objective, this function:
+  1. Reads the template's `agent_roster` array.
+  2. For each named agent, loads `<AgentsDir>/<name>.json`.
+  3. For each entry in the agent's `plugin_roster`, calls
+     `Plugin::Invoke(p, plugin, inputs, 120)` -- the existing
+     `Plugin::Invoke` was already implemented and audited each
+     invocation; nothing was calling it.
+  4. Copies each plugin's output file (from the `file` field of the
+     plugin's output JSON) into `deliverables/<project>/`.
+  5. Emits a `swarm_close` audit entry with
+     `plugins_invoked / plugins_ok / deliverables` counters.
+
+  Closes **G1 + G2 + G3 + G4** from the v0.3.7 gap analysis.
+- **`src/skill.cpp` — `CmdDispatchTemplate` now calls
+  `CmdDispatchAgentRoster` after `Template::Run`.** The v0.3.5
+  agent_roster validator runs first (so the operator sees manifest
+  errors before the dispatch starts); the executor runs after the
+  template is rendered.
+
+### Fixed
+- **G1 root cause: `Swarm::Spawn` only writes
+  `{"swarm_id":"...","objective":"...","tasks":[]}` and returns.**
+  This is still true (the planner is a separate concern), but the
+  executor now runs *after* Swarm::Spawn, walks the agent's
+  plugin_roster, and produces real deliverables.
+
+### Tests
+- **`tests/test_engine.ps1` G24** — new focused test for the executor.
+  Uses a synthetic template that names `media-stack` (real 7-plugin
+  agent). Asserts: `Plugin ` in stdout, `plugin_invoke` in audit,
+  at least one file in `deliverables/`, and the `swarm_close`
+  audit entry.
+- **`tests/test_engine.ps1` G21** — snapshot+restore the live
+  `agents/media-stack.json` + `agents/reviewer.quality.json` so
+  the reviewer-gate test no longer clobbers them. Closes G9.
+- **`tests/test_executor.ps1`** — new focused executor test (skill
+  repo) that runs the v0.3.7 acceptance gate end-to-end.
+
+### Notes
+This release makes the v0.3.0-v0.3.7 skill features
+(`media-stack`, `director.cinematic`, `cinematic-short`,
+`media-tutorial-video`, `reviewer.quality`) actually runnable.
+On engine v0.3.6 or earlier, the executor did not exist; the
+skill would validate the manifest and warn about missing agents,
+but never invoke a single plugin. **Engine v0.3.7+ is required
+for the v0.3.x skill feature set to work end-to-end.**
+
+The 0.3.5 and 0.3.6 releases (--recipe shortcut, agent_roster
+validator, version string read from Vortex.psd1, --recipe --source
+UX fix) are listed in the [v0.3.5 / v0.3.6 release
+notes](https://github.com/Cloudmeru/vortex-os-dotnet/releases).
+
 ## [0.3.0] — 2026-08-28
 
 ### Added — PRD-17 Cross-project memory & knowledge
