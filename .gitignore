@@ -11,6 +11,11 @@ obj/
 bin/
 out/
 dist/build/
+# Build output for src/build.ps1: Vortex.dll + ijwhost.dll land in
+# the package root (next to Vortex.psd1) AND a versioned subfolder
+# Vortex/<ver>/. The versioned subfolder is what install.ps1 uses
+# for the user-scope install; we never want it in the source tree.
+Vortex/
 
 # IDE
 .vs/
