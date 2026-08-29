@@ -4,6 +4,75 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.9] — 2026-08-29
+
+### Added — Reviewer-gate write path (completes the v0.3.5 half-feature)
+
+The v0.3.5 engine added the *read* path in `CmdPackage`
+(`plan.json.reviewer` + `plan.json.agent_roster` -> the
+"Reviewer gate: <name>" log line + "REVIEWER_INVOKE:" operator
+hint), but never added the *write* path. `Swarm::Spawn` only
+writes `{"swarm_id","objective","tasks":[]}` to plan.json, so
+the read path was inert for any real dispatch. The G21 test
+in the engine suite covered the read path by hand-crafting
+plan.json with the right fields.
+
+v0.3.9 closes the loop with `PatchPlanJsonWithReviewer` in
+`src/skill.cpp`:
+
+- After the executor (`CmdDispatchAgentRoster`) finishes, walk
+  the template's `agent_roster` array, look up each named
+  agent's manifest, and find the first one with a
+  `reviewer.name` block.
+- Parse plan.json as a `System.Text.Json.Nodes.JsonObject`
+  (mutable; `JsonElement` is read-only and can't add
+  properties), add `"reviewer":"<name>"` as a string and
+  `"agent_roster":[...]` as a string array, write back.
+- The agent manifest's `reviewer` field is an object
+  (`{"name":"reviewer.quality","when_to_invoke":"..."}`)
+  while `CmdPackage`'s reader expects a string
+  (`GetStrOr(plan, "reviewer", "")`). The patch flattens
+  `agent.reviewer.name` to a string at write time so both
+  sides agree.
+- Net effect: a real dispatch with `agent_roster:["media-stack"]`
+  now produces plan.json with `"reviewer":"reviewer.quality"`,
+  and `CmdPackage` emits the gate line and the operator hint
+  for free.
+
+Test: `tests/test_engine.ps1` G31a-c. G31a asserts the
+`reviewer` field is populated from the agent manifest. G31b
+asserts the `agent_roster` array is the flat string list
+`CmdPackage` expects. G31c asserts the patch preserves
+`Swarm::Spawn`'s original `swarm_id` and `tasks` fields
+(so we don't break the executor's downstream contract).
+
+### Fixed — `Swarm::Spawn` was writing invalid JSON to plan.json
+
+Pre-v0.3.9: `Swarm::Spawn` used `String::Format` to build
+plan.json with the raw `masterObjective` file path
+(`C:\Users\alber\...`). JSON strings require backslashes to
+be escaped as `\\`, so the result was invalid JSON:
+
+```json
+{"swarm_id":"...", "objective":"C:\Users\...", "tasks":[]}
+```
+
+Both the v0.3.5 reviewer-gate read path (`CmdPackage`) and
+the v0.3.9 write path (`PatchPlanJsonWithReviewer`) try to
+`JsonNode::Parse` plan.json, so the invalid JSON made both
+silently no-op. The first symptom was G31's "plan.json is
+not valid JSON: 'U' is an invalid escapable character" error.
+
+v0.3.9: replaced the `String::Format` with
+`JsonSerializer::Serialize` over a `Dictionary<String,Object>`.
+The framework serializer handles all the escaping.
+
+Test: implicit. G31a-c now read the same plan.json and
+find the patched fields, which they couldn't do when the
+file was unparsable.
+
+Builds: Vortex.dll 151 KB (up from 150 KB in v0.3.8.1).
+
 ## [0.3.8.1] — 2026-08-29
 
 ### Fixed — `--with-memory` newline escape bug (G30)

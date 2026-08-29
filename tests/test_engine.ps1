@@ -1215,6 +1215,52 @@ Write-Output '===END==='
     Check "G30c: --with-memory preserves real newlines" { $g30HasRealLF }
 
     # -----------------------------------------------------------------------
+    # G31: reviewer-gate write path (v0.3.9). The v0.3.5 engine added
+    # the READ path in CmdPackage but never the WRITE path -- Swarm::Spawn
+    # only writes {"swarm_id","objective","tasks":[]} to plan.json, so
+    # CmdPackage's "Reviewer gate: <name>" line never fired in real
+    # dispatches (only when G21 hand-crafted plan.json with the field).
+    # v0.3.9: CmdDispatchTemplate calls PatchPlanJsonWithReviewer after
+    # the executor runs. It walks the template's agent_roster, finds
+    # the first agent with `reviewer.name` in its manifest, and patches
+    # plan.json to add `"reviewer":"<name>"` (string) and
+    # `"agent_roster":[...]` (string array). G31 verifies the round
+    # trip end-to-end: dispatch a template that names media-stack
+    # (whose manifest has `reviewer.name="reviewer.quality"`), then
+    # read the swarm's plan.json and assert both fields are present.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "[31] reviewer-gate write path: agent manifest -> plan.json (v0.3.9)"
+    $g31Proj = "g31_reviewer_$((Get-Date).Ticks)"
+    $env:VORTEX_PROJECT = $g31Proj
+    $g31Template = Join-Path $swarmsDir 'g31_reviewer.json'
+    $g31Body = @{
+        name = "g31_reviewer"
+        version = "0.0.0"
+        objective_template = "smoke reviewer"
+        substitutions = @{}
+        deliverables = @()
+        hitl_gates = @()
+        self_heal_targets = @()
+        # media-stack is the canonical agent with a `reviewer` block in
+        # its manifest (reviewer.name = "reviewer.quality").
+        agent_roster = @("media-stack")
+    } | ConvertTo-Json -Depth 5
+    Set-Content -LiteralPath $g31Template -Value $g31Body -Encoding UTF8
+    & pwsh -NoProfile -File $skillPath --dispatch-template $g31Template 2>&1 | Out-Null
+    # The engine writes plan.json to <swarms>/active_<task_id>/plan.json.
+    # Pick the MOST RECENT plan.json (alphabetical "First 1" can return
+    # a plan.json from an earlier test in the suite).
+    $g31PlanFile = Get-ChildItem -Recurse -Filter 'plan.json' $swarmsDir -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $g31PlanContent = if ($g31PlanFile) { Get-Content $g31PlanFile.FullName -Raw } else { '' }
+    $g31HasReviewer = $g31PlanContent -match '"reviewer"\s*:\s*"reviewer\.quality"'
+    $g31HasRoster = $g31PlanContent -match '"agent_roster"\s*:\s*\[\s*"media-stack"\s*\]'
+    $g31PreservesOriginals = ($g31PlanContent -match '"swarm_id"\s*:\s*"') -and ($g31PlanContent -match '"tasks"\s*:\s*\[\s*\]')
+    Check "G31a: plan.json has reviewer field populated from agent manifest" { $g31HasReviewer }
+    Check "G31b: plan.json has agent_roster array (string, not object)" { $g31HasRoster }
+    Check "G31c: patch preserves Swarm::Spawn's swarm_id + tasks fields" { $g31PreservesOriginals }
+
+    # -----------------------------------------------------------------------
     # Summary
     # -----------------------------------------------------------------------
     Write-Host ""

@@ -19,9 +19,25 @@ namespace Vortex {
 
         // Delegate planning to the Shift Supervisor layer.
         // (The native LLM call is mocked here — same behavior as the bash stub.)
-        String^ swarmPlan = String::Format(
-            "{{\"swarm_id\":\"{0}\",\"objective\":\"{1}\",\"tasks\":[]}}",
-            swarmId, masterObjective == nullptr ? "" : masterObjective);
+        // v0.3.9: use System.Text.Json.JsonSerializer instead of
+        // String::Format. The pre-v0.3.9 String::Format inserted the
+        // raw `masterObjective` (a Windows file path with backslashes)
+        // into the JSON string, producing invalid JSON
+        // (`{"objective":"C:\Users\..."}` — backslashes must be escaped
+        // as `\\` in a JSON string). CmdPackage's reviewer-gate
+        // check (v0.3.5) and the v0.3.9 PatchPlanJsonWithReviewer
+        // both try to parse plan.json, so the invalid JSON made
+        // those paths silently no-op. v0.3.9: build a Dictionary
+        // and let the framework serializer escape everything.
+        String^ safeObjective = masterObjective == nullptr ? "" : masterObjective;
+        System::Collections::Generic::Dictionary<String^, Object^>^ planDict =
+            gcnew System::Collections::Generic::Dictionary<String^, Object^>();
+        planDict["swarm_id"] = swarmId;
+        planDict["objective"] = safeObjective;
+        planDict["tasks"] = gcnew System::Collections::Generic::List<Object^>();
+        JsonSerializerOptions^ planOpts = gcnew JsonSerializerOptions();
+        planOpts->WriteIndented = true;
+        String^ swarmPlan = JsonSerializer::Serialize(planDict, planOpts);
         File::WriteAllText(Path::Combine(swarmDir, "plan.json"), swarmPlan);
 
         // Isolate the local vector memory database for this swarm.

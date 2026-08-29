@@ -1,7 +1,7 @@
 @{
     # Script module + binary module = the .psm1 loads the C++/CLI .dll
     RootModule        = 'Vortex.psm1'
-    ModuleVersion     = '0.3.8.1'
+    ModuleVersion     = '0.3.9'
     GUID              = '7c3a9f1e-1184-4e6b-83b7-5b4a4f4e3b2a'
     Author            = 'MiniMax Agent'
     CompanyName       = 'VORTEX-OS'

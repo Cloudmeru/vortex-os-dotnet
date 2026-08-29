@@ -60,6 +60,12 @@ static int CmdDispatchAgentRoster(Paths^ p, String^ templatePath, String^ taskId
 // after the executor walks the roster, to write the durable
 // .manifest.json automatically.
 static int CmdPackage(Paths^ p, String^ swarmId, bool dryRun);
+// v0.3.9: complete the v0.3.5 reviewer-gate write path. Reads the
+// template's agent_roster, finds the first agent with a
+// `reviewer.name` block in its manifest, and patches plan.json to
+// add `"reviewer":"<name>"` and `"agent_roster":[...]`. Defined at
+// line ~338 below (just before CmdPackage).
+static void PatchPlanJsonWithReviewer(Paths^ p, String^ templateFile, String^ swarmId);
 
 // Replay a saved Golden Path workflow template
 static int CmdDispatchTemplate(Paths^ p, String^ templateFile, int episodeNumber,
@@ -115,6 +121,22 @@ static int CmdDispatchTemplate(Paths^ p, String^ templateFile, int episodeNumber
         : taskId;
     int execRc = CmdDispatchAgentRoster(p, templateFile, actualTaskId);
     if (execRc != 0) return execRc;
+    // v0.3.9: complete the v0.3.5 reviewer-gate wiring. v0.3.5 added
+    // the READ path in CmdPackage (plan.json.reviewer / plan.json
+    // .agent_roster -> "REVIEWER_INVOKE:" line) but never added the
+    // WRITE path -- Swarm::Spawn only writes
+    //   {"swarm_id":"...", "objective":"...", "tasks":[]}
+    // to plan.json. v0.3.9: after the executor runs, scan the
+    // template's agent_roster, look up each agent's manifest, find
+    // the first one with a `reviewer.name` block, and patch plan.json
+    // to add `"reviewer":"<name>"` (string) and `"agent_roster":[...]`
+    // (string array). CmdPackage's existing read path then picks
+    // them up unchanged.
+    try {
+        PatchPlanJsonWithReviewer(p, templateFile, actualTaskId);
+    } catch (Exception^ ex) {
+        ConsoleX::Warn("reviewer-gate patch skipped: " + ex->Message);
+    }
     // v0.3.8 (G12): auto-package. Pre-v0.3.8 the operator had to
     // manually run --package <swarm_id> after the dispatch to
     // write the durable .manifest.json. v0.3.8: after the executor
@@ -319,6 +341,92 @@ static int CmdDispatchAgentRoster(Paths^ p, String^ templatePath, String^ taskId
     );
 
     return 0;
+}
+
+// v0.3.9: complete the v0.3.5 reviewer-gate write path. The v0.3.5
+// commit added the READ path in CmdPackage but never the WRITE path:
+// Swarm::Spawn writes only
+//   {"swarm_id":"...", "objective":"...", "tasks":[]}
+// to plan.json. v0.3.9: after the executor runs, scan the template's
+// agent_roster, look up each agent's manifest, find the first one
+// with a `reviewer.name` block, and patch plan.json to add
+//   "reviewer": "<name>"   (string)
+//   "agent_roster": [...]  (string array)
+// so the existing CmdPackage reader picks them up unchanged.
+//
+// The agent manifest's `reviewer` field is an object
+//   { "name": "reviewer.quality", "when_to_invoke": "...", ... }
+// so we read `agent.reviewer.name` and write it as a flat string to
+// plan.json. CmdPackage's reader does `GetStrOr(plan, "reviewer", "")`
+// which expects a string -- this keeps both sides in agreement.
+static void PatchPlanJsonWithReviewer(Paths^ p, String^ templateFile, String^ swarmId) {
+    if (String::IsNullOrEmpty(templateFile) || !File::Exists(templateFile)) return;
+    if (String::IsNullOrEmpty(swarmId)) return;
+    // Packager::Package prepends "active_" but CmdDispatchTemplate
+    // passes the bare taskId. Mirror the same convention here.
+    String^ planPath = Path::Combine(p->SwarmsDir, "active_" + swarmId, "plan.json");
+    if (!File::Exists(planPath)) return;
+
+    // 1. Read the template's agent_roster.
+    JsonDocument^ tdoc = JsonX::ReadFile(templateFile);
+    if (tdoc == nullptr) return;
+    JsonElement troot = tdoc->RootElement;
+    JsonElement rosterEl = JsonX::GetProp(troot, "agent_roster");
+    if (rosterEl.ValueKind != JsonValueKind::Array) return;
+    // 2. Walk the roster; for each named agent, look up its manifest
+    //    and try to extract `reviewer.name` (the v0.3.x manifest shape).
+    String^ reviewerName = nullptr;
+    List<String^>^ rosterNames = gcnew List<String^>();
+    for each (JsonElement ag in rosterEl.EnumerateArray()) {
+        String^ agName = ag.GetString();
+        if (String::IsNullOrEmpty(agName)) continue;
+        rosterNames->Add(agName);
+        if (reviewerName != nullptr) continue;
+        String^ manifestPath = Path::Combine(p->AgentsDir, agName + ".json");
+        if (!File::Exists(manifestPath)) continue;
+        JsonDocument^ adoc = JsonX::ReadFile(manifestPath);
+        if (adoc == nullptr) continue;
+        try {
+            // The agent manifest has `reviewer` as an object with a
+            // `name` field. The CmdPackage reader expects a string,
+            // so flatten to the name here.
+            JsonElement revEl = JsonX::GetProp(adoc->RootElement, "reviewer");
+            if (revEl.ValueKind == JsonValueKind::Object) {
+                JsonElement nameEl = JsonX::GetProp(revEl, "name");
+                if (nameEl.ValueKind == JsonValueKind::String) {
+                    reviewerName = nameEl.GetString();
+                }
+            } else if (revEl.ValueKind == JsonValueKind::String) {
+                // Defensive: accept a string reviewer too.
+                reviewerName = revEl.GetString();
+            }
+        } catch (Exception^) { /* ignore */ }
+    }
+    if (reviewerName == nullptr) return;  // No agent declared a reviewer; nothing to patch.
+
+    // 3. Patch plan.json: read it as a mutable JsonNode, add the
+    //    two fields, write back. Use JsonNode (mutable) instead of
+    //    JsonElement (read-only) so we can add properties in place.
+    //    JsonNode/JsonObject/JsonArray/JsonValue live in
+    //    System.Text.Json.Nodes (NOT the bare System namespace).
+    String^ planText = File::ReadAllText(planPath);
+    System::Text::Json::Nodes::JsonNode^ planNode = nullptr;
+    try {
+        planNode = System::Text::Json::Nodes::JsonNode::Parse(planText);
+    } catch (Exception^ ex) {
+        ConsoleX::Warn("reviewer-gate patch: plan.json is not valid JSON: " + ex->Message);
+        return;
+    }
+    System::Text::Json::Nodes::JsonObject^ planObj = planNode->AsObject();
+    planObj["reviewer"] = System::Text::Json::Nodes::JsonValue::Create(reviewerName);
+    System::Text::Json::Nodes::JsonArray^ rosterArr = gcnew System::Text::Json::Nodes::JsonArray();
+    for each (String ^ n in rosterNames) rosterArr->Add(System::Text::Json::Nodes::JsonValue::Create(n));
+    planObj["agent_roster"] = rosterArr;
+    JsonSerializerOptions^ opts = gcnew JsonSerializerOptions();
+    opts->WriteIndented = true;
+    File::WriteAllText(planPath, planNode->ToJsonString(opts));
+    ConsoleX::Ok("reviewer-gate: patched plan.json with reviewer='" + reviewerName +
+        "' (from agent manifest); agent_roster has " + rosterNames->Count + " entry(ies)");
 }
 
 // Package one swarm's intermediate deliverables into the project's durable dir.
