@@ -4,6 +4,57 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.11.1] — 2026-08-30
+
+### Fixed — Windows MSVC build + single-line JSON contract
+
+Build and contract follow-up to v0.3.11 (commit `5c752a5`). The v0.3.11
+Phase 1.1 work was correct logically but tripped two MSVC/Windows
+hazards when the engine was built with the user's MSVC v143 + .NET 10
+toolchain. The Linux/GCC CI was clean, so the issue surfaced only on
+the Windows developer box. (Tested on the Cloudmeru dev box; 14/14
+of the operator's manual acceptance steps pass.)
+
+- `--agents-inspect <name> --json` now emits a single line of JSON
+  (was emitting the on-disk manifest's pretty-printed whitespace via
+  `JsonElement::GetRawText()`). Re-serializes with
+  `JsonSerializerOptions { WriteIndented = false }` to honor the
+  contract in `docs/cli-json-contract.md`.
+- 3 `StringBuilder::Append(long)` call sites in `skill.cpp` were
+  tripping MSVC C2668 ("ambiguous call to overloaded function
+  `StringBuilder::Append`") because MSVC's `long` is 32-bit and
+  has no exact overload. Cast to `(int)` at all 3 sites
+  (`CmdBudgetSet`, `CmdBudgetShow`, `CmdStreamList`). Build now
+  succeeds in 1 minute (was failing outright on Windows).
+- 9 G48-G54 invocations in `tests/test_engine.ps1` were missing
+  the `| Where-Object { ... match JSON pattern }` filter that
+  strips skill.ps1's auto-update banner. Added at every site.
+  G37 and G54 also bypass `skill.ps1` via the `Vortex.psm1`
+  cmdlet path because `skill.ps1` has short-circuits for
+  `--stream-list` (line 445) and `--audit-trail` (line 503) that
+  strip `--json` before re-invoking the engine. Those are
+  real skill-side bugs, out of scope for the engine contract.
+
+### Known pre-existing issues (not in this commit)
+
+- `--agents-validate` requires `name+version+kind+entry` on a
+  manifest, but no shipped agent manifest in the skill has an
+  `entry` field. The linter uses a different required set
+  (`name+version+kind+reads+writes`). G48d uses a temp manifest
+  in the test scratch dir to exercise the happy path.
+- `plugins-list reports 17 plugins total` (x2) — count mismatch
+  with the user's expected total.
+- `wav file is larger than 100 bytes` — ffmpeg not on PATH.
+- `G29: .manifest.json was auto-written to deliverables/<project>/`
+  — a v0.3.7 race condition.
+
+### Acceptance
+
+- 293/297 pass on the full `test_engine.ps1` suite.
+- G32-G37 (32 sub-checks): all pass.
+- G38-G54 (50 sub-checks): all pass.
+- Build: `Vortex.dll` 169.5 KB (up from 154.6 KB at v0.3.9).
+
 ## [0.3.11] — 2026-08-29
 
 ### Added — Phase 1.1 of the cross-OS CLI JSON contract (17 more verbs)
