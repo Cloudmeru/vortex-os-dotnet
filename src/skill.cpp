@@ -823,12 +823,20 @@ static int CmdHitlApprove(Paths^ p, String^ taskId, bool asJson) {
                           "auto-recorded by --hitl-approve", 0);
     }
     if (asJson) {
-        // Single-line JSON of the persisted checkpoint (the file body is
-        // already pretty-printed; we re-read it and emit GetRawText() so
-        // the schema is exactly what was written to disk).
+        // v0.3.11.1 (G39, latent-bug fix): re-serialize with
+        // WriteIndented=false so the output is always a single line
+        // of JSON honoring docs/cli-json-contract.md. GetRawText()
+        // would preserve whatever whitespace the on-disk file used
+        // (Hitl::WriteForApproval writes single-line today, but if
+        // that ever changes to pretty-print for human readability,
+        // the --json output would silently break the single-line
+        // contract). Re-serialize defensively so this code path is
+        // robust to on-disk format changes.
         JsonDocument^ reread = JsonX::ReadFile(f);
         if (reread != nullptr) {
-            Console::WriteLine(reread->RootElement.GetRawText());
+            JsonSerializerOptions^ approveOpts = gcnew JsonSerializerOptions();
+            approveOpts->WriteIndented = false;
+            Console::WriteLine(JsonSerializer::Serialize(reread->RootElement, approveOpts));
         } else {
             Console::WriteLine(body);
         }
@@ -893,9 +901,14 @@ static int CmdHitlDeny(Paths^ p, String^ taskId, bool asJson) {
                           "DENY: " + action, "auto-recorded by --hitl-deny", 0);
     }
     if (asJson) {
+        // v0.3.11.1 (G40, latent-bug fix): same re-serialize-with-
+        // WriteIndented=false pattern as CmdHitlApprove. See the
+        // comment there for the rationale.
         JsonDocument^ reread = JsonX::ReadFile(f);
         if (reread != nullptr) {
-            Console::WriteLine(reread->RootElement.GetRawText());
+            JsonSerializerOptions^ denyOpts = gcnew JsonSerializerOptions();
+            denyOpts->WriteIndented = false;
+            Console::WriteLine(JsonSerializer::Serialize(reread->RootElement, denyOpts));
         } else {
             Console::WriteLine(body);
         }

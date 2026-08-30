@@ -146,10 +146,20 @@ namespace Vortex {
         JsonElement arr = ReadAll(p);
         StringBuilder^ sb = gcnew StringBuilder();
         sb->Append("{\"decisions\":[");
+        // v0.3.11.1 (G34, latent-bug fix): re-serialize with
+        // WriteIndented=false so each decision row is always a single
+        // line of JSON. The on-disk decision_history.json is currently
+        // written single-line by Decisions::Append, so GetRawText() would
+        // work today -- but the contract says --json mode MUST emit a
+        // single line of JSON, and that's a property of THIS function,
+        // not of the on-disk format. Re-serialize defensively so this
+        // code path is robust to on-disk format changes.
+        JsonSerializerOptions^ decOpts = gcnew JsonSerializerOptions();
+        decOpts->WriteIndented = false;
         if (arr.ValueKind == JsonValueKind::Array) {
             for (int i = 0; i < arr.GetArrayLength(); i++) {
                 if (i > 0) sb->Append(",");
-                sb->Append(arr[i].GetRawText());
+                sb->Append(JsonSerializer::Serialize(arr[i], decOpts));
             }
         }
         sb->Append("]}");

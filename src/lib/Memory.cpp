@@ -1004,11 +1004,22 @@ namespace Vortex {
 
         // operator
         sb->Append(",\"operator\":");
+        // v0.3.11.1 (G32, latent-bug fix): re-serialize with
+        // WriteIndented=false so the embedded operator JSON is always
+        // a single line. The on-disk operator.json is currently
+        // written single-line by Memory::CompileOperator, so GetRawText()
+        // would work today -- but the contract says --json mode MUST
+        // emit a single line of JSON, and that's a property of THIS
+        // function, not of the on-disk format. Re-serialize defensively.
         if (File::Exists(OperatorFile(p))) {
             try {
                 String^ op = File::ReadAllText(OperatorFile(p))->Trim();
                 JsonDocument^ d = JsonDocument::Parse(op);
-                if (d != nullptr) sb->Append(d->RootElement.GetRawText());
+                if (d != nullptr) {
+                    JsonSerializerOptions^ memOpts = gcnew JsonSerializerOptions();
+                    memOpts->WriteIndented = false;
+                    sb->Append(JsonSerializer::Serialize(d->RootElement, memOpts));
+                }
                 else sb->Append("null");
             } catch (Exception^) { sb->Append("null"); }
         } else {
@@ -1041,7 +1052,11 @@ namespace Vortex {
                         try {
                             String^ c = File::ReadAllText(projectPath)->Trim();
                             JsonDocument^ d = JsonDocument::Parse(c);
-                            if (d != nullptr) sb->Append(d->RootElement.GetRawText());
+                            if (d != nullptr) {
+                                JsonSerializerOptions^ memOpts = gcnew JsonSerializerOptions();
+                                memOpts->WriteIndented = false;
+                                sb->Append(JsonSerializer::Serialize(d->RootElement, memOpts));
+                            }
                         } catch (Exception^) {}
                     }
                 }
@@ -1057,7 +1072,11 @@ namespace Vortex {
                 try {
                     String^ c = File::ReadAllText(seriesPath)->Trim();
                     JsonDocument^ d = JsonDocument::Parse(c);
-                    if (d != nullptr) sb->Append(d->RootElement.GetRawText());
+                    if (d != nullptr) {
+                        JsonSerializerOptions^ memOpts = gcnew JsonSerializerOptions();
+                        memOpts->WriteIndented = false;
+                        sb->Append(JsonSerializer::Serialize(d->RootElement, memOpts));
+                    }
                     else sb->Append("null");
                 } catch (Exception^) { sb->Append("null"); }
             } else {

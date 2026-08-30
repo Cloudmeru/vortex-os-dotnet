@@ -1857,14 +1857,15 @@ Write-Output '===END==='
     $g56AuditFile = Join-Path $scratchHome 'memory\audit.jsonl'
     $g56AuditDir = Split-Path -Parent $g56AuditFile
     if (-not (Test-Path $g56AuditDir)) { New-Item -ItemType Directory -Path $g56AuditDir -Force | Out-Null }
-    # Use a single-line JSONL entry (matching the engine's actual on-disk
-    # format when one JSON object = one line). The engine reads each line
-    # with JsonDocument::Parse which can't recover from a line that has
-    # the opening { but not the closing } -- it falls back to {"raw":...}
-    # which strips the typed fields. v0.3.11.1 (G56) only needs to prove
-    # the engine's re-serialization is single-line; the typed-field
-    # round-trip is a v0.3.x+ concern (TODO: add a multi-line-aware
-    # JSONL parser so pretty-printed Audit::Emit output round-trips).
+    # Use a single-line JSONL entry (matching the engine's actual
+    # on-disk format when one JSON object = one line). The engine
+    # reads each line with JsonDocument::Parse which can't recover
+    # from a line that has the opening { but not the closing } --
+    # it falls back to {"raw":...} which strips the typed fields.
+    # Audit::Emit (src/lib/Audit.cpp) actually writes single-line
+    # JSON, so this matches reality. v0.3.11.1 (G56) proves the
+    # engine's re-serialization is single-line + the typed fields
+    # round-trip through the trace filter.
     '{"ts":"2026-08-30T12:00:00Z","tier":"T2","agent":"test.shift","action":"deliver","status":"ok","severity":"LOW","task_id":"g56_trace_test"}' |
         Set-Content -LiteralPath $g56AuditFile
     $g56Out = & pwsh -NoProfile -File $skillPath --agents-trace g56_trace_test --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String

@@ -47,8 +47,10 @@ namespace Vortex {
 
         // Dump a single agent manifest. Mirrors cmd_agents_inspect.
         // v0.3.11 (Phase 1.1, G47): --json mode emits the manifest's
-        // JSON contents as a single-line object (the file is already JSON;
-        // we just emit GetRawText so the schema is exactly the manifest).
+        // JSON contents as a single-line object. v0.3.11.1 replaced
+        // GetRawText() with JsonSerializer::Serialize(WriteIndented=false)
+        // so the output is robust to the on-disk manifest being
+        // pretty-printed (hand-formatted JSON).
         // In text mode the file is dumped as-is (also JSON, pretty-printed
         // by the author's editor).
         static int AgentsInspect(Paths^ p, String^ name, bool asJson);
