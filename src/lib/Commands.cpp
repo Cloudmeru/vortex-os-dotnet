@@ -276,7 +276,14 @@ namespace Vortex {
             return 1;
         }
         JsonElement root = doc->RootElement;
-        array<String^>^ required = gcnew array<String^> { "name", "version", "kind", "entry" };
+        // v0.3.11.2 (bug fix): align the validator's required-field list
+        // with the linter's (line ~138). Pre-v0.3.11.2 the validator
+        // required {name, version, kind, entry} but no shipped agent
+        // manifest in the skill has an `entry` field, so every
+        // validate call reported ok=false even on valid manifests.
+        // The linter's list {name, version, kind, reads, writes} is
+        // what the shipped manifests actually contain, so we use it.
+        array<String^>^ required = gcnew array<String^> { "name", "version", "kind", "reads", "writes" };
         List<String^>^ missing = gcnew List<String^>();
         for each (String ^ k in required) {
             if (!JsonX::Has(root, k)) missing->Add(k);

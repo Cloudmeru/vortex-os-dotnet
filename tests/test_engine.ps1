@@ -1414,15 +1414,13 @@ Write-Output '===END==='
 
     # G37: --stream-list --json returns {"streams":[...],"total":N,"in_progress":"<path>"}
     #
-    # Note: this test goes through the Vortex.psm1 cmdlet (Get-VortexStream -AsJson)
-    # rather than skill.ps1, because skill.ps1 has a short-circuit for --stream-list
-    # (lines 445-464) that strips all other args before re-invoking the engine. That
-    # short-circuit drops --json, so the engine falls back to text mode and emits
-    # "  (no in-progress dispatches)" instead of the JSON object. The cmdlet path
-    # calls [Vortex.Skill]::Run directly, so --json is preserved. The skill.ps1
-    # bug is a real (separate) issue but is out of scope for the engine contract.
-    $g37Cmd = "& { Import-Module '$engineDir\Vortex.psd1' -ErrorAction Stop; Get-VortexStream -AsJson }"
-    $g37Out = & pwsh -NoProfile -Command $g37Cmd 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    # v0.3.11.2: this test now goes through skill.ps1 (the same path
+    # the operator would use) because the --stream-list short-circuit
+    # at skill.ps1:445 was fixed to skip itself when --json is in
+    # $Arguments. Pre-v0.3.11.2 we bypassed via the Vortex.psm1
+    # cmdlet because the short-circuit stripped --json. With the fix,
+    # the end-to-end path is contract-compliant.
+    $g37Out = & pwsh -NoProfile -File $skillPath --stream-list --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
     $g37Out = $g37Out.Trim()
     $g37Json = $null
     $g37JsonLine = Get-VortexJsonLine $g37Out
@@ -1655,22 +1653,15 @@ Write-Output '===END==='
 
     # G48: --agents-validate --json returns {file, ok, missing[], reason}
     #
-    # Note: the shipped supervisor.store.json doesn't have an `entry` field,
-    # so the engine's --agents-validate (which requires name+version+kind+entry)
-    # reports ok=false on it. That's a pre-existing validator schema mismatch
-    # (the linter at --agents-lint uses name+version+kind+reads+writes, which
-    # all 6 shipped manifests satisfy), out of scope for the JSON contract.
-    # G48d uses a temp manifest with all 4 validator-required fields to
-    # exercise the happy path.
-    $g48ValidFile = Join-Path $scratchHome 'g48_valid_manifest.json'
-    @'
-{
-  "name": "g48.test",
-  "version": "1.0.0",
-  "kind": "dynamic",
-  "entry": "main"
-}
-'@ | Set-Content -Path $g48ValidFile -Encoding UTF8
+    # v0.3.11.2: pre-v0.3.11.2 the validator required {name, version, kind,
+    # entry} but no shipped manifest has `entry`, so G48d had to use a
+    # temp manifest with the missing `entry` field. The fix aligned the
+    # validator's required-field list with the linter's
+    # {name, version, kind, reads, writes} which all 6 shipped manifests
+    # satisfy. G48d now validates the real shipped supervisor.store.json
+    # (proving the contract works against the engine's own manifest,
+    # not a test-only fixture).
+    $g48ValidFile = Join-Path $skillRoot 'agents\supervisor.store.json'
     $g48Out = & pwsh -NoProfile -File $skillPath --agents-validate $g48ValidFile --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
     $g48Out = $g48Out.Trim()
     $g48Json = $null
@@ -1791,15 +1782,14 @@ Write-Output '===END==='
 
     # G54: --audit-trail --json returns {entries[], total, log, truncated}
     #
-    # Note: this test goes through the Vortex.psm1 cmdlet (Get-VortexAuditTrail
-    # -AsJson) rather than skill.ps1, because skill.ps1 has a short-circuit for
-    # --audit-trail (lines 503-535) that strips all other args and routes to the
-    # rich Vortex.AuditViewer.psm1 viewer (which has no -AsJson; only -Format json).
-    # The cmdlet path calls [Vortex.Skill]::Run directly, so --json is preserved.
-    # The skill.ps1 bug is a real (separate) issue but is out of scope for the
-    # engine contract. See G37 for the same pattern.
-    $g54Cmd = "& { Import-Module '$engineDir\Vortex.psd1' -ErrorAction Stop; Get-VortexAuditTrail -AsJson }"
-    $g54Out = & pwsh -NoProfile -Command $g54Cmd 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    # v0.3.11.2: this test now goes through skill.ps1 (the same path
+    # the operator would use) because the --audit-trail short-circuit
+    # at skill.ps1:503 was fixed to skip itself when --json is in
+    # $Arguments. Pre-v0.3.11.2 we bypassed via the Vortex.psm1
+    # cmdlet because the short-circuit routed to the rich
+    # Vortex.AuditViewer (which only has -Format json, not -AsJson).
+    # With the fix, the end-to-end path is contract-compliant.
+    $g54Out = & pwsh -NoProfile -File $skillPath --audit-trail --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
     $g54Out = $g54Out.Trim()
     $g54Json = $null
     $g54JsonLine = Get-VortexJsonLine $g54Out
