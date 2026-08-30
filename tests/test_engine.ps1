@@ -374,7 +374,13 @@ try {
     Write-Host ""
     Write-Host "[9] Plugin system"
 
-    # --plugins-list discovers all 6 skill-scope reference plugins.
+    # --plugins-list discovers all skill-scope reference plugins.
+    # v0.3.11.1: the count was hardcoded to 17 (the v0.2.1 total).
+    # 6 plugins have been added since (scene-decomposer, editor.stitch,
+    # qa.core, qa.cinematic-short, qa.media-tutorial-video,
+    # qa.iteration-pattern) so the test now extracts the count from
+    # the "Total: N plugin(s)" line in the engine output rather than
+    # hardcoding it.
     $listOut = (& pwsh -NoProfile -File $skillPath --plugins-list 2>&1 | Out-String)
     Check "plugins-list shows audio-foley"        { $listOut -match 'audio-foley' }
     Check "plugins-list shows text-writer"        { $listOut -match 'text-writer' }
@@ -382,7 +388,15 @@ try {
     Check "plugins-list shows image-portrait"     { $listOut -match 'image-portrait' }
     Check "plugins-list shows code-typescript"    { $listOut -match 'code-typescript' }
     Check "plugins-list shows media-ffmpeg"       { $listOut -match 'media-ffmpeg' }
-    Check "plugins-list reports 17 plugins total" { $listOut -match 'Total: 17 plugin' }
+    $gPluginsCount = 0
+    if ($listOut -match 'Total:\s+(\d+)\s+plugin') { $gPluginsCount = [int]$matches[1] }
+    Check "plugins-list reports a non-zero total" { $gPluginsCount -gt 0 }
+    Check "plugins-list reports the same count as the data row count" {
+        # A data row is "  <name>  <version>  <capability>  <source>".
+        # Count the lines that match a plugin-name + semver pattern.
+        $dataRows = ([regex]::Matches($listOut, '(?m)^\s+[a-z][a-z0-9.\-]+\s+\d+\.\d+\.\d+\s+')).Count
+        $dataRows -eq $gPluginsCount
+    }
     Check "plugins-list marks them as skill-scope" { $listOut -match 'skill' }
 
     # --plugins-info dumps a single plugin's manifest.
@@ -493,13 +507,21 @@ Write-Output '===END==='
     Check "plugin SDK exports all 5 functions" { $sdkTest -match 'all exported' }
 
     # 11 additional reference plugins (v0.2.1) -- all discoverable + invokable.
+    # v0.3.11.1: now 6 QA/director plugins on top of these 11 + the original
+    # 6 (audio-foley, text-writer, text-editor, image-portrait,
+    # code-typescript, media-ffmpeg) = 23 total. The count check
+    # compares against the count extracted at line 385 (above).
     $listOut2 = (& pwsh -NoProfile -File $skillPath --plugins-list 2>&1 | Out-String)
     foreach ($p in 'audio-music','audio-voice','image-cover','image-map',
                    'code-python','video-hailuo','video-animator',
                    'data-researcher','data-analyst','design-mockup','media-sqlite') {
         Check "plugins-list shows $p" { $listOut2 -match [regex]::Escape($p) }
     }
-    Check "plugins-list now reports 17 plugins total" { $listOut2 -match 'Total: 17 plugin' }
+    $gPluginsCount2 = 0
+    if ($listOut2 -match 'Total:\s+(\d+)\s+plugin') { $gPluginsCount2 = [int]$matches[1] }
+    Check "plugins-list total matches the first call's count (no add/remove drift)" {
+        $gPluginsCount2 -eq $gPluginsCount
+    }
 
     # --plugin-install with a bad URL: should fail gracefully (downloads,
     # tries to extract, errors out, removes the partial folder).
@@ -1259,6 +1281,637 @@ Write-Output '===END==='
     Check "G31a: plan.json has reviewer field populated from agent manifest" { $g31HasReviewer }
     Check "G31b: plan.json has agent_roster array (string, not object)" { $g31HasRoster }
     Check "G31c: patch preserves Swarm::Spawn's swarm_id + tasks fields" { $g31PreservesOriginals }
+
+    # -----------------------------------------------------------------------
+    # G32-G37: Phase 1 of the cross-OS contract (v0.3.10). These 6 tests
+    # assert the JSON output shape documented in docs/cli-json-contract.md
+    # for 6 read-only verbs. The contract is:
+    #   - single line, no envelope
+    #   - top-level array for lists, object for single results
+    #   - errors come out as {"error":"..."} on the same stdout stream
+    #   - missing data: null for objects, [] for arrays
+    # The test checks the output is valid JSON AND has the documented
+    # shape (top-level type + key fields). Future verb additions
+    # should follow the same pattern in this section.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "=== G32-G37: CLI JSON contract (v0.3.10) ===" -ForegroundColor Cyan
+
+    # Helper: extract the JSON line from output that may be contaminated
+    # by skill.ps1's auto-update banner. The engine emits exactly one
+    # line of JSON on stdout (per docs/cli-json-contract.md). The wrapper's
+    # [vortex-os] auto-update notice is on a separate line. Find the line
+    # that starts with { or [ (a JSON object/array) and return it.
+    function Get-VortexJsonLine {
+        param([string[]] $Lines)
+        $jsonLine = $Lines | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Select-Object -First 1
+        if ($jsonLine) { return $jsonLine.Trim() }
+        return $null
+    }
+
+    # G32: --memory-show --json returns {"project":..,"operator":..,
+    #     "prior_projects":[..],"series":..,"chars":N,"truncated":bool}
+    $g32Out = & pwsh -NoProfile -File $skillPath --memory-show smoke-g32 --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g32Out = $g32Out.Trim()
+    $g32Json = $null
+    $g32JsonLine = Get-VortexJsonLine $g32Out
+    try { $g32Json = $g32Out | ConvertFrom-Json } catch {}
+    Check "G32a: --memory-show --json output is valid JSON" { $g32Json -ne $null }
+    Check "G32b: --memory-show --json is a single line" { ($null -ne $g32JsonLine) -and -not ($g32JsonLine.Contains([char]10) -or $g32JsonLine.Contains([char]13)) }
+    Check "G32c: --memory-show --json top-level is an object" { $g32Json -is [pscustomobject] }
+    Check "G32d: --memory-show --json has project key" { $g32Json.PSObject.Properties['project'] -and $g32Json.project -eq 'smoke-g32' }
+    Check "G32e: --memory-show --json has operator key (null when no operator.json)" { $g32Json.PSObject.Properties['operator'] }
+    Check "G32f: --memory-show --json has prior_projects array" { $g32Json.PSObject.Properties['prior_projects'] -and $g32Json.prior_projects -is [array] }
+    Check "G32g: --memory-show --json has chars + truncated keys" {
+        $g32Json.PSObject.Properties['chars'] -and $g32Json.PSObject.Properties['truncated']
+    }
+
+    # G33: --budget-show --project X --json returns {"project":..,
+    #     "tokens_total":N,"usd_total":N,"so_far":{...},"percent_used":N}
+    $g33Proj = "smoke-g33-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    & pwsh -NoProfile -File $skillPath --budget-set --project $g33Proj --tokens-total 1000000 --usd-total 5.0 2>&1 | Out-Null
+    $g33Out = & pwsh -NoProfile -File $skillPath --budget-show --project $g33Proj --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g33Out = $g33Out.Trim()
+    $g33Json = $null
+    $g33JsonLine = Get-VortexJsonLine $g33Out
+    try { $g33Json = $g33Out | ConvertFrom-Json } catch {}
+    Check "G33a: --budget-show --json output is valid JSON" { $g33Json -ne $null }
+    Check "G33b: --budget-show --json is a single line" { ($null -ne $g33JsonLine) -and -not ($g33JsonLine.Contains([char]10) -or $g33JsonLine.Contains([char]13)) }
+    Check "G33c: --budget-show --json echoes the project name" { $g33Json.project -eq $g33Proj }
+    Check "G33d: --budget-show --json has tokens_total + usd_total" {
+        $g33Json.PSObject.Properties['tokens_total'] -and $g33Json.PSObject.Properties['usd_total']
+    }
+    Check "G33e: --budget-show --json has so_far sub-object" {
+        $g33Json.PSObject.Properties['so_far'] -and $g33Json.so_far -is [pscustomobject]
+    }
+    Check "G33f: --budget-show --json has percent_used" { $g33Json.PSObject.Properties['percent_used'] }
+    # G33g: --budget-show with no --project in JSON mode emits {"error":"..."}
+    $g33ErrOut = & pwsh -NoProfile -File $skillPath --budget-show --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g33ErrJson = $null
+    $g33ErrJsonLine = Get-VortexJsonLine $g33ErrOut
+    try { $g33ErrJson = $g33ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G33g: --budget-show --json without --project emits {error:..}" {
+        $g33ErrJson -and $g33ErrJson.PSObject.Properties['error']
+    }
+
+    # G34: --decision-list --json returns {"decisions":[<obj>,...]}
+    $g34Out = & pwsh -NoProfile -File $skillPath --decision-list --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g34Out = $g34Out.Trim()
+    $g34Json = $null
+    $g34JsonLine = Get-VortexJsonLine $g34Out
+    try { $g34Json = $g34Out | ConvertFrom-Json } catch {}
+    Check "G34a: --decision-list --json output is valid JSON" { $g34Json -ne $null }
+    Check "G34b: --decision-list --json is a single line" { ($null -ne $g34JsonLine) -and -not ($g34JsonLine.Contains([char]10) -or $g34JsonLine.Contains([char]13)) }
+    Check "G34c: --decision-list --json has decisions array (may be empty)" {
+        $g34Json.PSObject.Properties['decisions'] -and $g34Json.decisions -is [array]
+    }
+    # G34d: record a decision and assert it round-trips through JSON
+    $g34Task = "g34-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    & pwsh -NoProfile -File $skillPath --decision-record --task $g34Task --gate g1 --severity HIGH --choice "G34 smoke approve" --reason "test" 2>&1 | Out-Null
+    $g34Out2 = & pwsh -NoProfile -File $skillPath --decision-list --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g34Json2 = $null
+    try { $g34Json2 = $g34Out2.Trim() | ConvertFrom-Json } catch {}
+    $g34Found = $g34Json2.decisions | Where-Object { $_.task_id -eq $g34Task }
+    Check "G34d: --decision-list --json includes the just-recorded decision" {
+        $g34Found -ne $null -and $g34Found.choice -eq 'G34 smoke approve'
+    }
+
+    # G35: --plugins-list --json returns {"plugins":[<obj>,...],"total":N}
+    $g35Out = & pwsh -NoProfile -File $skillPath --plugins-list --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g35Out = $g35Out.Trim()
+    $g35Json = $null
+    $g35JsonLine = Get-VortexJsonLine $g35Out
+    try { $g35Json = $g35Out | ConvertFrom-Json } catch {}
+    Check "G35a: --plugins-list --json output is valid JSON" { $g35Json -ne $null }
+    Check "G35b: --plugins-list --json is a single line" { ($null -ne $g35JsonLine) -and -not ($g35JsonLine.Contains([char]10) -or $g35JsonLine.Contains([char]13)) }
+    Check "G35c: --plugins-list --json has plugins array + total" {
+        $g35Json.PSObject.Properties['plugins'] -and $g35Json.PSObject.Properties['total']
+    }
+    Check "G35d: --plugins-list --json plugin entries have name+version+source" {
+        $g35Json.plugins.Count -gt 0 -and
+        $g35Json.plugins[0].PSObject.Properties['name'] -and
+        $g35Json.plugins[0].PSObject.Properties['version'] -and
+        $g35Json.plugins[0].PSObject.Properties['source']
+    }
+    Check "G35e: --plugins-list --json total matches array length" {
+        $g35Json.total -eq $g35Json.plugins.Count
+    }
+
+    # G36: --team-config --json returns {"config":<obj|null>,"paths":{...}}
+    $g36Out = & pwsh -NoProfile -File $skillPath --team-config --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g36Out = $g36Out.Trim()
+    $g36Json = $null
+    $g36JsonLine = Get-VortexJsonLine $g36Out
+    try { $g36Json = $g36Out | ConvertFrom-Json } catch {}
+    Check "G36a: --team-config --json output is valid JSON" { $g36Json -ne $null }
+    Check "G36b: --team-config --json is a single line" { ($null -ne $g36JsonLine) -and -not ($g36JsonLine.Contains([char]10) -or $g36JsonLine.Contains([char]13)) }
+    Check "G36c: --team-config --json has config key (null when team mode is off)" {
+        $g36Json.PSObject.Properties['config']
+    }
+    Check "G36d: --team-config --json has paths sub-object with state_dir" {
+        $g36Json.PSObject.Properties['paths'] -and $g36Json.paths.PSObject.Properties['state_dir']
+    }
+
+    # G37: --stream-list --json returns {"streams":[...],"total":N,"in_progress":"<path>"}
+    #
+    # Note: this test goes through the Vortex.psm1 cmdlet (Get-VortexStream -AsJson)
+    # rather than skill.ps1, because skill.ps1 has a short-circuit for --stream-list
+    # (lines 445-464) that strips all other args before re-invoking the engine. That
+    # short-circuit drops --json, so the engine falls back to text mode and emits
+    # "  (no in-progress dispatches)" instead of the JSON object. The cmdlet path
+    # calls [Vortex.Skill]::Run directly, so --json is preserved. The skill.ps1
+    # bug is a real (separate) issue but is out of scope for the engine contract.
+    $g37Cmd = "& { Import-Module '$engineDir\Vortex.psd1' -ErrorAction Stop; Get-VortexStream -AsJson }"
+    $g37Out = & pwsh -NoProfile -Command $g37Cmd 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g37Out = $g37Out.Trim()
+    $g37Json = $null
+    $g37JsonLine = Get-VortexJsonLine $g37Out
+    try { $g37Json = $g37Out | ConvertFrom-Json } catch {}
+    Check "G37a: --stream-list --json output is valid JSON" { $g37Json -ne $null }
+    Check "G37b: --stream-list --json is a single line" { ($null -ne $g37JsonLine) -and -not ($g37JsonLine.Contains([char]10) -or $g37JsonLine.Contains([char]13)) }
+    Check "G37c: --stream-list --json has streams array + total" {
+        $g37Json.PSObject.Properties['streams'] -and $g37Json.PSObject.Properties['total']
+    }
+    Check "G37d: --stream-list --json has in_progress path" {
+        $g37Json.PSObject.Properties['in_progress'] -and ($g37Json.in_progress -match 'in_progress')
+    }
+
+    # -----------------------------------------------------------------------
+    # G38-G54: Phase 1.1 of the cross-OS CLI JSON contract (v0.3.11).
+    # Same contract as G32-G37: single line, valid JSON, documented shape.
+    # This batch covers the action verbs + inspector verbs that v0.3.10
+    # deferred. Each G-test block asserts:
+    #   - the output is valid JSON
+    #   - the output is a single line
+    #   - the documented top-level shape is present
+    #   - at least one error-path assertion (where applicable) so a
+    #     regression in the {error:..} shape fails fast
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "=== G38-G54: CLI JSON contract Phase 1.1 (v0.3.11) ===" -ForegroundColor Cyan
+
+    # G38: --cost-estimate --json returns {model, tokens_in, tokens_out, cost_usd}
+    $g38Out = & pwsh -NoProfile -File $skillPath --cost-estimate --model gpt-4o --tokens-in 1000 --tokens-out 500 --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g38Out = $g38Out.Trim()
+    $g38Json = $null
+    $g38JsonLine = Get-VortexJsonLine $g38Out
+    try { $g38Json = $g38Out | ConvertFrom-Json } catch {}
+    Check "G38a: --cost-estimate --json output is valid JSON" { $g38Json -ne $null }
+    Check "G38b: --cost-estimate --json is a single line" { ($null -ne $g38JsonLine) -and -not ($g38JsonLine.Contains([char]10) -or $g38JsonLine.Contains([char]13)) }
+    Check "G38c: --cost-estimate --json echoes model+tokens+cost" {
+        $g38Json.model -eq 'gpt-4o' -and
+        $g38Json.tokens_in -eq 1000 -and
+        $g38Json.tokens_out -eq 500 -and
+        $g38Json.PSObject.Properties['cost_usd']
+    }
+    # G38d: --cost-estimate without --model in JSON mode emits {error:..}
+    $g38ErrOut = & pwsh -NoProfile -File $skillPath --cost-estimate --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g38ErrJson = $null
+    $g38ErrJsonLine = Get-VortexJsonLine $g38ErrOut
+    try { $g38ErrJson = $g38ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G38d: --cost-estimate --json without --model emits {error:..}" {
+        $g38ErrJson -and $g38ErrJson.PSObject.Properties['error']
+    }
+
+    # G39: --hitl-approve (no pending request -> {error:..}); success path
+    # requires a real pending_approvals/<task>.json, so we write a stub.
+    $g39Task = "g39-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    $g39StateDir = Join-Path $scratchHome "state\pending_approvals"
+    if (-not (Test-Path $g39StateDir)) { New-Item -ItemType Directory -Path $g39StateDir -Force | Out-Null }
+    $g39Body = '{"task_id":"' + $g39Task + '","status":"PENDING","severity":"HIGH","proposed_action":"ship it","timestamp":1700000000}'
+    Set-Content -LiteralPath (Join-Path $g39StateDir "$g39Task.json") -Value $g39Body -Encoding UTF8
+    $g39Out = & pwsh -NoProfile -File $skillPath --hitl-approve $g39Task --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g39Out = $g39Out.Trim()
+    $g39Json = $null
+    $g39JsonLine = Get-VortexJsonLine $g39Out
+    try { $g39Json = $g39Out | ConvertFrom-Json } catch {}
+    Check "G39a: --hitl-approve --json output is valid JSON" { $g39Json -ne $null }
+    Check "G39b: --hitl-approve --json is a single line" { ($null -ne $g39JsonLine) -and -not ($g39JsonLine.Contains([char]10) -or $g39JsonLine.Contains([char]13)) }
+    Check "G39c: --hitl-approve --json has task_id + status=APPROVED" {
+        $g39Json.task_id -eq $g39Task -and $g39Json.status -eq 'APPROVED'
+    }
+    Check "G39d: --hitl-approve --json for missing task emits {error:..}" {
+        $g39MissingOut = & pwsh -NoProfile -File $skillPath --hitl-approve "no-such-task-99" --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+        $g39MissingJson = $null
+        try { $g39MissingJson = $g39MissingOut.Trim() | ConvertFrom-Json } catch {}
+        $g39MissingJson -and $g39MissingJson.PSObject.Properties['error']
+    }
+
+    # G40: --hitl-deny
+    $g40Task = "g40-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    $g40Body = '{"task_id":"' + $g40Task + '","status":"PENDING","severity":"CRITICAL","proposed_action":"ship it","timestamp":1700000000}'
+    Set-Content -LiteralPath (Join-Path $g39StateDir "$g40Task.json") -Value $g40Body -Encoding UTF8
+    $g40Out = & pwsh -NoProfile -File $skillPath --hitl-deny $g40Task --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g40Out = $g40Out.Trim()
+    $g40Json = $null
+    $g40JsonLine = Get-VortexJsonLine $g40Out
+    try { $g40Json = $g40Out | ConvertFrom-Json } catch {}
+    Check "G40a: --hitl-deny --json output is valid JSON" { $g40Json -ne $null }
+    Check "G40b: --hitl-deny --json has task_id + status=DENIED" {
+        $g40Json.task_id -eq $g40Task -and $g40Json.status -eq 'DENIED'
+    }
+
+    # G41: --hitl-status --json returns {pending:[{...}], total:N}
+    $g41Out = & pwsh -NoProfile -File $skillPath --hitl-status --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g41Out = $g41Out.Trim()
+    $g41Json = $null
+    $g41JsonLine = Get-VortexJsonLine $g41Out
+    try { $g41Json = $g41Out | ConvertFrom-Json } catch {}
+    Check "G41a: --hitl-status --json output is valid JSON" { $g41Json -ne $null }
+    Check "G41b: --hitl-status --json is a single line" { ($null -ne $g41JsonLine) -and -not ($g41JsonLine.Contains([char]10) -or $g41JsonLine.Contains([char]13)) }
+    Check "G41c: --hitl-status --json has pending array + total" {
+        $g41Json.PSObject.Properties['pending'] -and
+        $g41Json.PSObject.Properties['total'] -and
+        $g41Json.pending -is [array]
+    }
+    Check "G41d: --hitl-status --json total matches array length" {
+        $g41Json.total -eq $g41Json.pending.Count
+    }
+
+    # G42: --cost-record --json returns the recorded entry as a structured object
+    $g42Task = "g42-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    $g42Out = & pwsh -NoProfile -File $skillPath --cost-record --task $g42Task --agent g42-agent --model gpt-4o --tokens-in 1000 --tokens-out 500 --tags a,b --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g42Out = $g42Out.Trim()
+    $g42Json = $null
+    $g42JsonLine = Get-VortexJsonLine $g42Out
+    try { $g42Json = $g42Out | ConvertFrom-Json } catch {}
+    Check "G42a: --cost-record --json output is valid JSON" { $g42Json -ne $null }
+    Check "G42b: --cost-record --json is a single line" { ($null -ne $g42JsonLine) -and -not ($g42JsonLine.Contains([char]10) -or $g42JsonLine.Contains([char]13)) }
+    Check "G42c: --cost-record --json echoes task+agent+model+tokens" {
+        $g42Json.task_id -eq $g42Task -and
+        $g42Json.agent -eq 'g42-agent' -and
+        $g42Json.model -eq 'gpt-4o' -and
+        $g42Json.tokens_in -eq 1000 -and
+        $g42Json.tokens_out -eq 500
+    }
+    Check "G42d: --cost-record --json has tags array" {
+        $g42Json.PSObject.Properties['tags'] -and
+        $g42Json.tags -is [array] -and
+        $g42Json.tags.Count -eq 2 -and
+        $g42Json.tags[0] -eq 'a' -and
+        $g42Json.tags[1] -eq 'b'
+    }
+    Check "G42e: --cost-record --json has cost_usd" { $g42Json.PSObject.Properties['cost_usd'] }
+    # G42f: missing required flags -> {error:..}
+    $g42ErrOut = & pwsh -NoProfile -File $skillPath --cost-record --task foo --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g42ErrJson = $null
+    $g42ErrJsonLine = Get-VortexJsonLine $g42ErrOut
+    try { $g42ErrJson = $g42ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G42f: --cost-record --json missing flags emits {error:..}" {
+        $g42ErrJson -and $g42ErrJson.PSObject.Properties['error']
+    }
+
+    # G43: --budget-set --json returns the persisted budget as a structured object
+    $g43Proj = "g43-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    $g43Out = & pwsh -NoProfile -File $skillPath --budget-set --project $g43Proj --tokens-total 100000 --usd-total 2.5 --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g43Out = $g43Out.Trim()
+    $g43Json = $null
+    $g43JsonLine = Get-VortexJsonLine $g43Out
+    try { $g43Json = $g43Out | ConvertFrom-Json } catch {}
+    Check "G43a: --budget-set --json output is valid JSON" { $g43Json -ne $null }
+    Check "G43b: --budget-set --json is a single line" { ($null -ne $g43JsonLine) -and -not ($g43JsonLine.Contains([char]10) -or $g43JsonLine.Contains([char]13)) }
+    Check "G43c: --budget-set --json echoes project+tokens_total+usd_total" {
+        $g43Json.project -eq $g43Proj -and
+        $g43Json.tokens_total -eq 100000 -and
+        $g43Json.PSObject.Properties['usd_total']
+    }
+    # G43d: --budget-set with no --project in JSON mode -> {error:..}
+    $g43ErrOut = & pwsh -NoProfile -File $skillPath --budget-set --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g43ErrJson = $null
+    $g43ErrJsonLine = Get-VortexJsonLine $g43ErrOut
+    try { $g43ErrJson = $g43ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G43d: --budget-set --json without --project emits {error:..}" {
+        $g43ErrJson -and $g43ErrJson.PSObject.Properties['error']
+    }
+
+    # G44: --plugin-install --json (use a deliberately bad URL so we get the
+    # error path without needing real network access; the test of the
+    # success path requires a real GitHub URL and is skipped in this
+    # offline test env).
+    $g44ErrOut = & pwsh -NoProfile -File $skillPath --plugin-install "not-a-url" --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g44ErrJson = $null
+    $g44ErrJsonLine = Get-VortexJsonLine $g44ErrOut
+    try { $g44ErrJson = $g44ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G44a: --plugin-install --json with bad URL emits {error:..}" {
+        $g44ErrJson -and $g44ErrJson.PSObject.Properties['error']
+    }
+    Check "G44b: --plugin-install --json error is a single line" { -not ($g44ErrOut.Trim().Contains([char]10) -or $g44ErrOut.Trim().Contains([char]13)) }
+
+    # G45: --plugin-remove --json (no user-scope plugin named X -> {error:..})
+    $g45ErrOut = & pwsh -NoProfile -File $skillPath --plugin-remove "no-such-plugin-99" --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g45ErrJson = $null
+    $g45ErrJsonLine = Get-VortexJsonLine $g45ErrOut
+    try { $g45ErrJson = $g45ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G45a: --plugin-remove --json for missing plugin emits {error:..}" {
+        $g45ErrJson -and $g45ErrJson.PSObject.Properties['error']
+    }
+
+    # G46: --decision-record --json returns the recorded decision as a structured object
+    $g46Task = "g46-$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+    $g46Out = & pwsh -NoProfile -File $skillPath --decision-record --task $g46Task --gate g1 --severity HIGH --choice "G46 approve" --reason "smoke" --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g46Out = $g46Out.Trim()
+    $g46Json = $null
+    $g46JsonLine = Get-VortexJsonLine $g46Out
+    try { $g46Json = $g46Out | ConvertFrom-Json } catch {}
+    Check "G46a: --decision-record --json output is valid JSON" { $g46Json -ne $null }
+    Check "G46b: --decision-record --json is a single line" { ($null -ne $g46JsonLine) -and -not ($g46JsonLine.Contains([char]10) -or $g46JsonLine.Contains([char]13)) }
+    Check "G46c: --decision-record --json has task+gate+severity+choice+reason+index" {
+        $g46Json.task_id -eq $g46Task -and
+        $g46Json.gate -eq 'g1' -and
+        $g46Json.severity -eq 'HIGH' -and
+        $g46Json.choice -eq 'G46 approve' -and
+        $g46Json.PSObject.Properties['index']
+    }
+    # G46d: --decision-record missing required flags -> {error:..}
+    $g46ErrOut = & pwsh -NoProfile -File $skillPath --decision-record --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g46ErrJson = $null
+    $g46ErrJsonLine = Get-VortexJsonLine $g46ErrOut
+    try { $g46ErrJson = $g46ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G46d: --decision-record --json missing flags emits {error:..}" {
+        $g46ErrJson -and $g46ErrJson.PSObject.Properties['error']
+    }
+
+    # G47: --agents-inspect --json returns the manifest as a single-line JSON object
+    $g47Out = & pwsh -NoProfile -File $skillPath --agents-inspect supervisor.store --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g47Out = $g47Out.Trim()
+    $g47Json = $null
+    $g47JsonLine = Get-VortexJsonLine $g47Out
+    try { $g47Json = $g47Out | ConvertFrom-Json } catch {}
+    Check "G47a: --agents-inspect --json output is valid JSON" { $g47Json -ne $null }
+    Check "G47b: --agents-inspect --json is a single line" { ($null -ne $g47JsonLine) -and -not ($g47JsonLine.Contains([char]10) -or $g47JsonLine.Contains([char]13)) }
+    Check "G47c: --agents-inspect --json echoes manifest fields" {
+        $g47Json.name -eq 'supervisor.store' -and
+        $g47Json.PSObject.Properties['version'] -and
+        $g47Json.PSObject.Properties['kind']
+    }
+    # G47d: --agents-inspect for unknown name -> {error:..}
+    $g47ErrOut = & pwsh -NoProfile -File $skillPath --agents-inspect no-such-agent-99 --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g47ErrJson = $null
+    $g47ErrJsonLine = Get-VortexJsonLine $g47ErrOut
+    try { $g47ErrJson = $g47ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G47d: --agents-inspect --json for missing agent emits {error:..}" {
+        $g47ErrJson -and $g47ErrJson.PSObject.Properties['error']
+    }
+
+    # G48: --agents-validate --json returns {file, ok, missing[], reason}
+    #
+    # Note: the shipped supervisor.store.json doesn't have an `entry` field,
+    # so the engine's --agents-validate (which requires name+version+kind+entry)
+    # reports ok=false on it. That's a pre-existing validator schema mismatch
+    # (the linter at --agents-lint uses name+version+kind+reads+writes, which
+    # all 6 shipped manifests satisfy), out of scope for the JSON contract.
+    # G48d uses a temp manifest with all 4 validator-required fields to
+    # exercise the happy path.
+    $g48ValidFile = Join-Path $scratchHome 'g48_valid_manifest.json'
+    @'
+{
+  "name": "g48.test",
+  "version": "1.0.0",
+  "kind": "dynamic",
+  "entry": "main"
+}
+'@ | Set-Content -Path $g48ValidFile -Encoding UTF8
+    $g48Out = & pwsh -NoProfile -File $skillPath --agents-validate $g48ValidFile --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g48Out = $g48Out.Trim()
+    $g48Json = $null
+    $g48JsonLine = Get-VortexJsonLine $g48Out
+    try { $g48Json = $g48Out | ConvertFrom-Json } catch {}
+    Check "G48a: --agents-validate --json output is valid JSON" { $g48Json -ne $null }
+    Check "G48b: --agents-validate --json is a single line" { ($null -ne $g48JsonLine) -and -not ($g48JsonLine.Contains([char]10) -or $g48JsonLine.Contains([char]13)) }
+    Check "G48c: --agents-validate --json has file+ok+missing+reason" {
+        $g48Json.PSObject.Properties['file'] -and
+        $g48Json.PSObject.Properties['ok'] -and
+        $g48Json.PSObject.Properties['missing'] -and
+        $g48Json.PSObject.Properties['reason']
+    }
+    Check "G48d: --agents-validate --json for valid manifest reports ok=true" { $g48Json.ok -eq $true }
+    Check "G48e: --agents-validate --json for missing file emits {error:..}" {
+        $g48ErrOut = & pwsh -NoProfile -File $skillPath --agents-validate "C:\nope\no-such-file.json" --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+        $g48ErrJson = $null
+    $g48ErrJsonLine = Get-VortexJsonLine $g48ErrOut
+        try { $g48ErrJson = $g48ErrOut.Trim() | ConvertFrom-Json } catch {}
+        $g48ErrJson -and $g48ErrJson.PSObject.Properties['error']
+    }
+
+    # G49: --agents-lint --json returns {results:[{file, ok, reason}], pass, fail}
+    $g49Out = & pwsh -NoProfile -File $skillPath --agents-lint --all --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g49Out = $g49Out.Trim()
+    $g49Json = $null
+    $g49JsonLine = Get-VortexJsonLine $g49Out
+    try { $g49Json = $g49Out | ConvertFrom-Json } catch {}
+    Check "G49a: --agents-lint --json output is valid JSON" { $g49Json -ne $null }
+    Check "G49b: --agents-lint --json is a single line" { -not ($g49Out.Contains([char]10) -or $g49Out.Contains([char]13)) }
+    Check "G49c: --agents-lint --json has results+pass+fail" {
+        $g49Json.PSObject.Properties['results'] -and
+        $g49Json.PSObject.Properties['pass'] -and
+        $g49Json.PSObject.Properties['fail']
+    }
+    Check "G49d: --agents-lint --json results have file+ok fields" {
+        $g49Json.results.Count -gt 0 -and
+        $g49Json.results[0].PSObject.Properties['file'] -and
+        $g49Json.results[0].PSObject.Properties['ok']
+    }
+    Check "G49e: --agents-lint --json pass+fail matches results count" {
+        ($g49Json.pass + $g49Json.fail) -eq $g49Json.results.Count
+    }
+
+    # G50: --agents-trace --json returns {run_id, entries:[...], total}
+    $g50Out = & pwsh -NoProfile -File $skillPath --agents-trace "no-such-trace-99" --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g50Out = $g50Out.Trim()
+    $g50Json = $null
+    $g50JsonLine = Get-VortexJsonLine $g50Out
+    try { $g50Json = $g50Out | ConvertFrom-Json } catch {}
+    Check "G50a: --agents-trace --json output is valid JSON" { $g50Json -ne $null }
+    Check "G50b: --agents-trace --json is a single line" { -not ($g50Out.Contains([char]10) -or $g50Out.Contains([char]13)) }
+    Check "G50c: --agents-trace --json has run_id+entries+total" {
+        $g50Json.run_id -eq 'no-such-trace-99' -and
+        $g50Json.PSObject.Properties['entries'] -and
+        $g50Json.total -eq 0
+    }
+    # G50d: --agents-trace with no run_id -> {error:..}
+    $g50ErrOut = & pwsh -NoProfile -File $skillPath --agents-trace --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g50ErrJson = $null
+    $g50ErrJsonLine = Get-VortexJsonLine $g50ErrOut
+    try { $g50ErrJson = $g50ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G50d: --agents-trace --json without run_id emits {error:..}" {
+        $g50ErrJson -and $g50ErrJson.PSObject.Properties['error']
+    }
+
+    # G51: --agents-graph --json returns {format, nodes[], total}
+    $g51Out = & pwsh -NoProfile -File $skillPath --agents-graph --format ascii --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g51Out = $g51Out.Trim()
+    $g51Json = $null
+    $g51JsonLine = Get-VortexJsonLine $g51Out
+    try { $g51Json = $g51Out | ConvertFrom-Json } catch {}
+    Check "G51a: --agents-graph --json output is valid JSON" { $g51Json -ne $null }
+    Check "G51b: --agents-graph --json is a single line" { -not ($g51Out.Contains([char]10) -or $g51Out.Contains([char]13)) }
+    Check "G51c: --agents-graph --json has format+nodes+total" {
+        $g51Json.format -eq 'ascii' -and
+        $g51Json.PSObject.Properties['nodes'] -and
+        $g51Json.PSObject.Properties['total'] -and
+        $g51Json.nodes -is [array]
+    }
+
+    # G52: --agents-factory-diff --json returns {name, version, kind, capabilities[]}
+    $g52Out = & pwsh -NoProfile -File $skillPath --agents-factory-diff supervisor.store --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g52Out = $g52Out.Trim()
+    $g52Json = $null
+    $g52JsonLine = Get-VortexJsonLine $g52Out
+    try { $g52Json = $g52Out | ConvertFrom-Json } catch {}
+    Check "G52a: --agents-factory-diff --json output is valid JSON" { $g52Json -ne $null }
+    Check "G52b: --agents-factory-diff --json is a single line" { -not ($g52Out.Contains([char]10) -or $g52Out.Contains([char]13)) }
+    Check "G52c: --agents-factory-diff --json has name+version+kind+capabilities" {
+        $g52Json.name -eq 'supervisor.store' -and
+        $g52Json.PSObject.Properties['version'] -and
+        $g52Json.PSObject.Properties['kind'] -and
+        $g52Json.PSObject.Properties['capabilities']
+    }
+    # G52d: --agents-factory-diff for unknown name -> {error:..}
+    $g52ErrOut = & pwsh -NoProfile -File $skillPath --agents-factory-diff no-such-agent-99 --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g52ErrJson = $null
+    $g52ErrJsonLine = Get-VortexJsonLine $g52ErrOut
+    try { $g52ErrJson = $g52ErrOut.Trim() | ConvertFrom-Json } catch {}
+    Check "G52d: --agents-factory-diff --json for missing agent emits {error:..}" {
+        $g52ErrJson -and $g52ErrJson.PSObject.Properties['error']
+    }
+
+    # G53: --inspector-check --json returns {task_id, return_code, verdict, ...}
+    $g53Out = & pwsh -NoProfile -File $skillPath --inspector-check no-such-task-99 --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g53Out = $g53Out.Trim()
+    $g53Json = $null
+    $g53JsonLine = Get-VortexJsonLine $g53Out
+    try { $g53Json = $g53Out | ConvertFrom-Json } catch {}
+    Check "G53a: --inspector-check --json output is valid JSON" { $g53Json -ne $null }
+    Check "G53b: --inspector-check --json is a single line" { -not ($g53Out.Contains([char]10) -or $g53Out.Contains([char]13)) }
+    Check "G53c: --inspector-check --json has task_id+return_code+verdict" {
+        $g53Json.task_id -eq 'no-such-task-99' -and
+        $g53Json.PSObject.Properties['return_code'] -and
+        $g53Json.PSObject.Properties['verdict']
+    }
+
+    # G54: --audit-trail --json returns {entries[], total, log, truncated}
+    #
+    # Note: this test goes through the Vortex.psm1 cmdlet (Get-VortexAuditTrail
+    # -AsJson) rather than skill.ps1, because skill.ps1 has a short-circuit for
+    # --audit-trail (lines 503-535) that strips all other args and routes to the
+    # rich Vortex.AuditViewer.psm1 viewer (which has no -AsJson; only -Format json).
+    # The cmdlet path calls [Vortex.Skill]::Run directly, so --json is preserved.
+    # The skill.ps1 bug is a real (separate) issue but is out of scope for the
+    # engine contract. See G37 for the same pattern.
+    $g54Cmd = "& { Import-Module '$engineDir\Vortex.psd1' -ErrorAction Stop; Get-VortexAuditTrail -AsJson }"
+    $g54Out = & pwsh -NoProfile -Command $g54Cmd 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g54Out = $g54Out.Trim()
+    $g54Json = $null
+    $g54JsonLine = Get-VortexJsonLine $g54Out
+    try { $g54Json = $g54Out | ConvertFrom-Json } catch {}
+    Check "G54a: --audit-trail --json output is valid JSON" { $g54Json -ne $null }
+    Check "G54b: --audit-trail --json is a single line" { -not ($g54Out.Contains([char]10) -or $g54Out.Contains([char]13)) }
+    Check "G54c: --audit-trail --json has entries+total+log+truncated" {
+        $g54Json.PSObject.Properties['entries'] -and
+        $g54Json.PSObject.Properties['total'] -and
+        $g54Json.PSObject.Properties['log'] -and
+        $g54Json.PSObject.Properties['truncated']
+    }
+
+    # -----------------------------------------------------------------------
+    # G55-G57: Phase 1 contract gaps closed in v0.3.11.1.
+    #
+    # v0.3.10 + v0.3.11 (G32-G54) covered 23 of the 25 verbs in the
+    # contract table. The 2 not covered were pre-existing --json modes:
+    #   - --agents-discover --json (used GetRawText, broke single-line)
+    #   - --cost-report --json (already correct, exercised in section [7])
+    # and 1 verb with a latent multi-line bug:
+    #   - --agents-trace --json (GetRawText per entry; G50 missed it
+    #     because the test only traced a non-existent run_id with
+    #     entries=[])
+    #
+    # v0.3.11.1 fixes all 3 and adds G55-G57 to lock the contract.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "=== G55-G57: Contract gaps closed in v0.3.11.1 ===" -ForegroundColor Cyan
+
+    # G55: --agents-discover --json returns a single-line array.
+    # Pre-v0.3.11.1 the engine used JsonElement::GetRawText() which
+    # preserved the on-disk manifest's pretty-printed whitespace.
+    $g55Out = & pwsh -NoProfile -File $skillPath --agents-discover --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g55Out = $g55Out.Trim()
+    $g55Json = $null
+    $g55JsonLine = Get-VortexJsonLine $g55Out
+    try { $g55Json = $g55Out | ConvertFrom-Json } catch {}
+    Check "G55a: --agents-discover --json output is valid JSON" { $g55Json -ne $null }
+    Check "G55b: --agents-discover --json is a single line" { ($null -ne $g55JsonLine) -and -not ($g55JsonLine.Contains([char]10) -or $g55JsonLine.Contains([char]13)) }
+    Check "G55c: --agents-discover --json is a top-level array" { $g55Json -is [array] }
+    Check "G55d: --agents-discover --json has at least one agent" { $g55Json.Count -gt 0 }
+    Check "G55e: --agents-discover --json entries have name+version+kind" {
+        $g55Json[0].PSObject.Properties['name'] -and
+        $g55Json[0].PSObject.Properties['version'] -and
+        $g55Json[0].PSObject.Properties['kind']
+    }
+
+    # G56: --agents-trace --json returns a single-line object even
+    # when entries[] is non-empty. Pre-v0.3.11.1 the engine used
+    # GetRawText() per entry, which would emit multi-line pretty-
+    # printed JSON for any real trace. G50 only tested a non-existent
+    # run_id (entries=[]) so it didn't catch the bug. G56 seeds a
+    # real entry and asserts single-line.
+    $g56AuditFile = Join-Path $scratchHome 'memory\audit.jsonl'
+    $g56AuditDir = Split-Path -Parent $g56AuditFile
+    if (-not (Test-Path $g56AuditDir)) { New-Item -ItemType Directory -Path $g56AuditDir -Force | Out-Null }
+    # Use a single-line JSONL entry (matching the engine's actual
+    # on-disk format when one JSON object = one line). The engine
+    # reads each line with JsonDocument::Parse which can't recover
+    # from a line that has the opening { but not the closing } --
+    # it falls back to {"raw":...} which strips the typed fields.
+    # Audit::Emit (src/lib/Audit.cpp) actually writes single-line
+    # JSON, so this matches reality. v0.3.11.1 (G56) proves the
+    # engine's re-serialization is single-line + the typed fields
+    # round-trip through the trace filter.
+    '{"ts":"2026-08-30T12:00:00Z","tier":"T2","agent":"test.shift","action":"deliver","status":"ok","severity":"LOW","task_id":"g56_trace_test"}' |
+        Set-Content -LiteralPath $g56AuditFile
+    $g56Out = & pwsh -NoProfile -File $skillPath --agents-trace g56_trace_test --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g56Out = $g56Out.Trim()
+    $g56Json = $null
+    $g56JsonLine = Get-VortexJsonLine $g56Out
+    try { $g56Json = $g56Out | ConvertFrom-Json } catch {}
+    Check "G56a: --agents-trace --json with 1 entry is valid JSON" { $g56Json -ne $null }
+    Check "G56b: --agents-trace --json with 1 entry is a single line" {
+        ($null -ne $g56JsonLine) -and -not ($g56JsonLine.Contains([char]10) -or $g56JsonLine.Contains([char]13))
+    }
+    Check "G56c: --agents-trace --json has entries[0] with task_id round-trip" {
+        if ($g56Json.entries.Count -eq 1) {
+            $g56Json.entries[0].PSObject.Properties['task_id'] -and
+            $g56Json.entries[0].task_id -eq 'g56_trace_test'
+        } else { $false }
+    }
+    Check "G56d: --agents-trace --json total matches entries count" {
+        $g56Json.total -eq 1 -and $g56Json.entries.Count -eq 1
+    }
+
+    # G57: New-VortexSilentWav actually writes the silent audio samples
+    # for the requested duration, not just a 44-byte header. The
+    # fallback is hit when neither mcode-tools nor ffmpeg is on PATH
+    # (true on this Windows host). Pre-v0.3.11.1 the WAV was 44 bytes
+    # so the audio-foley plugin's "wav file is larger than 100 bytes"
+    # test failed; v0.3.11.1 fixes New-VortexSilentWav.
+    $g57WavPath = Join-Path $scratchHome 'g57_silent.wav'
+    $g57Result = & "C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile -Command "& { Import-Module '$skillDir\plugin-sdk\Vortex.Plugin.psm1' -Force; New-VortexSilentWav -OutFile '$g57WavPath' -DurationSec 2 }" 2>&1
+    Check "G57a: New-VortexSilentWav wrote a 2-second WAV" {
+        if (Test-Path $g57WavPath) { (Get-Item $g57WavPath).Length -gt 100 } else { $false }
+    }
+    Check "G57b: New-VortexSilentWav 2-second WAV is larger than 88,000 bytes" {
+        # 22050 Hz * 2 sec * 2 bytes = 88,200 bytes of silent audio data
+        # + 44-byte header = ~88,244 bytes. Anything > 88,000 is the
+        # full duration; < 100 would be just the header.
+        if (Test-Path $g57WavPath) { (Get-Item $g57WavPath).Length -gt 88000 } else { $false }
+    }
+    Check "G57c: New-VortexSilentWav WAV header is valid (RIFF + WAVE)" {
+        if (Test-Path $g57WavPath) {
+            $bytes = [System.IO.File]::ReadAllBytes($g57WavPath)
+            $riff = [System.Text.Encoding]::ASCII.GetString($bytes[0..3])
+            $wave = [System.Text.Encoding]::ASCII.GetString($bytes[8..11])
+            $riff -eq 'RIFF' -and $wave -eq 'WAVE'
+        } else { $false }
+    }
 
     # -----------------------------------------------------------------------
     # Summary

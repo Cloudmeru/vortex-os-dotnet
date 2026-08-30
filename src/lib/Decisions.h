@@ -46,5 +46,16 @@ namespace Vortex {
         // Format the decision history as a human-readable one-liner-per-row
         // string for the --decision-list CLI output.
         static String^ FormatTable(Paths^ p);
+
+        // v0.3.10 (Phase 1, G34): same data as FormatTable but as a
+        // single-line JSON object per docs/cli-json-contract.md.
+        //   { "decisions": [ {ts, task_id, gate, severity, choice,
+        //                      reason, episode_number}, ... ] }
+        // The "decisions" array is the raw JSON of each row in
+        // decision_history.json (so the schema is whatever the audit
+        // + Append code wrote), preserving the Append-time fields
+        // verbatim. When the file is missing or empty, returns
+        //   {"decisions":[]}
+        static String^ FormatJson(Paths^ p);
     };
 }

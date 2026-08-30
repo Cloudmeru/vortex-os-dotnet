@@ -44,11 +44,19 @@ namespace Vortex {
         }
 
         if (outputJson) {
+            // v0.3.11.1 (G55): re-serialize each agent manifest with
+            // WriteIndented=false so the output is a single line of JSON
+            // honoring docs/cli-json-contract.md. GetRawText() would
+            // preserve whatever whitespace the on-disk manifest used
+            // (typically pretty-printed by hand), which would break
+            // the single-line contract.
+            JsonSerializerOptions^ discoverOpts = gcnew JsonSerializerOptions();
+            discoverOpts->WriteIndented = false;
             StringBuilder^ sb = gcnew StringBuilder();
             sb->Append("[");
             for (int i = 0; i < discovered->Count; i++) {
                 if (i > 0) sb->Append(",");
-                sb->Append(discovered[i].GetRawText());
+                sb->Append(JsonSerializer::Serialize(discovered[i], discoverOpts));
             }
             sb->Append("]");
             Console::WriteLine(sb->ToString());
@@ -81,11 +89,15 @@ namespace Vortex {
     // -------------------------------------------------------------------------
     // Lint — verify required manifest fields are present.
     // -------------------------------------------------------------------------
-    int Commands::AgentsLint(Paths^ p, String^ target) {
+    int Commands::AgentsLint(Paths^ p, String^ target, bool asJson) {
         List<String^>^ files = gcnew List<String^>();
         if (target == "--all" || String::IsNullOrEmpty(target)) {
             if (!Directory::Exists(p->AgentsDir)) {
-                Console::WriteLine("LINT_FAIL: agents dir not found");
+                if (asJson) {
+                    Console::WriteLine("{\"results\":[],\"pass\":0,\"fail\":1,\"error\":\"agents dir not found: " + JsonX::EscapeJson(p->AgentsDir) + "\"}");
+                } else {
+                    Console::WriteLine("LINT_FAIL: agents dir not found");
+                }
                 return 1;
             }
             for each (String ^ f in Directory::GetFiles(p->AgentsDir, "*.json", SearchOption::AllDirectories)) {
@@ -97,47 +109,101 @@ namespace Vortex {
             files->Add(Path::Combine(p->AgentsDir, target + ".json"));
         }
 
-        int fail = 0;
+        // v0.3.11 (Phase 1.1, G49): we accumulate per-file results in both
+        // text and JSON modes so the output is consistent. In text mode we
+        // print LINT_OK / LINT_FAIL lines; in JSON mode we emit a single
+        // {"results":[...],"pass":N,"fail":N} object.
+        List<Tuple<String^, bool, String^>^>^ results =
+            gcnew List<Tuple<String^, bool, String^>^>();
         for each (String ^ f in files) {
             if (!File::Exists(f)) {
-                Console::WriteLine("LINT_FAIL: not found " + f);
-                fail = 1;
+                if (asJson) {
+                    results->Add(gcnew Tuple<String^, bool, String^>(f, false, "not found"));
+                } else {
+                    Console::WriteLine("LINT_FAIL: not found " + f);
+                }
                 continue;
             }
             JsonDocument^ doc = JsonX::ReadFile(f);
             if (doc == nullptr) {
-                Console::WriteLine("LINT_FAIL: " + f + " (invalid JSON)");
-                fail = 1;
+                if (asJson) {
+                    results->Add(gcnew Tuple<String^, bool, String^>(f, false, "invalid JSON"));
+                } else {
+                    Console::WriteLine("LINT_FAIL: " + f + " (invalid JSON)");
+                }
                 continue;
             }
             JsonElement root = doc->RootElement;
-            bool ok = JsonX::Has(root, "name")    &&
-                       JsonX::Has(root, "version") &&
-                       JsonX::Has(root, "kind")    &&
-                       JsonX::Has(root, "reads")   &&
-                       JsonX::Has(root, "writes");
-            if (ok) {
+            List<String^>^ missing = gcnew List<String^>();
+            array<String^>^ required = gcnew array<String^> { "name", "version", "kind", "reads", "writes" };
+            for each (String ^ k in required) {
+                if (!JsonX::Has(root, k)) missing->Add(k);
+            }
+            bool ok = missing->Count == 0;
+            if (asJson) {
+                results->Add(gcnew Tuple<String^, bool, String^>(f, ok, ok ? "" : String::Join(",", missing)));
+            } else if (ok) {
                 Console::WriteLine("LINT_OK: " + f);
             } else {
                 Console::WriteLine("LINT_FAIL: " + f + " (missing required fields)");
-                fail = 1;
             }
         }
-        return fail;
+        if (asJson) {
+            int pass = 0, fail = 0;
+            for each (auto t in results) { if (t->Item2) pass++; else fail++; }
+            StringBuilder^ sb = gcnew StringBuilder();
+            sb->Append("{\"results\":[");
+            bool first = true;
+            for each (auto t in results) {
+                if (!first) sb->Append(",");
+                first = false;
+                sb->Append("{\"file\":\""); sb->Append(JsonX::EscapeJson(t->Item1));
+                sb->Append("\",\"ok\":"); sb->Append(t->Item2 ? "true" : "false");
+                sb->Append(",\"reason\":\""); sb->Append(JsonX::EscapeJson(t->Item3));
+                sb->Append("\"}");
+            }
+            sb->Append("],\"pass\":"); sb->Append(pass);
+            sb->Append(",\"fail\":"); sb->Append(fail);
+            sb->Append("}");
+            Console::WriteLine(sb->ToString());
+            return fail > 0 ? 1 : 0;
+        }
+        // Text mode return code: 0 if all pass, 1 if any fail (matches pre-v0.3.11)
+        int textFail = 0;
+        for each (auto t in results) { if (!t->Item2) { textFail = 1; break; } }
+        return textFail;
     }
 
     // -------------------------------------------------------------------------
     // Graph — simple name list (matches the bash stub)
     // -------------------------------------------------------------------------
-    int Commands::AgentsGraph(Paths^ p, String^ format) {
+    int Commands::AgentsGraph(Paths^ p, String^ format, bool asJson) {
+        List<String^>^ nodes = gcnew List<String^>();
+        if (Directory::Exists(p->AgentsDir)) {
+            for each (String ^ f in Directory::GetFiles(p->AgentsDir, "*.json")) {
+                JsonDocument^ doc = JsonX::ReadFile(f);
+                if (doc == nullptr) continue;
+                String^ name = JsonX::GetStr(doc->RootElement, "name");
+                if (name == nullptr) name = Path::GetFileNameWithoutExtension(f);
+                nodes->Add(name);
+            }
+        }
+        if (asJson) {
+            StringBuilder^ sb = gcnew StringBuilder();
+            sb->Append("{\"format\":\""); sb->Append(JsonX::EscapeJson(format == nullptr ? "ascii" : format));
+            sb->Append("\",\"nodes\":[");
+            for (int i = 0; i < nodes->Count; i++) {
+                if (i > 0) sb->Append(",");
+                sb->Append("\""); sb->Append(JsonX::EscapeJson(nodes[i])); sb->Append("\"");
+            }
+            sb->Append("],\"total\":"); sb->Append(nodes->Count);
+            sb->Append("}");
+            Console::WriteLine(sb->ToString());
+            return 0;
+        }
         Console::WriteLine("(graph for " + (format == nullptr ? "ascii" : format) + ")");
-        if (!Directory::Exists(p->AgentsDir)) return 0;
-        for each (String ^ f in Directory::GetFiles(p->AgentsDir, "*.json")) {
-            JsonDocument^ doc = JsonX::ReadFile(f);
-            if (doc == nullptr) continue;
-            String^ name = JsonX::GetStr(doc->RootElement, "name");
-            if (name == nullptr) name = Path::GetFileNameWithoutExtension(f);
-            Console::WriteLine("  " + name);
+        for each (String ^ n in nodes) {
+            Console::WriteLine("  " + n);
         }
         return 0;
     }
@@ -145,96 +211,212 @@ namespace Vortex {
     // -------------------------------------------------------------------------
     // Inspect — dump a single manifest
     // -------------------------------------------------------------------------
-    int Commands::AgentsInspect(Paths^ p, String^ name) {
+    int Commands::AgentsInspect(Paths^ p, String^ name, bool asJson) {
         if (String::IsNullOrEmpty(name)) {
-            Console::WriteLine("Usage: --agents-inspect <name>");
+            if (asJson) {
+                Console::WriteLine("{\"error\":\"--agents-inspect requires a name\"}");
+            } else {
+                Console::WriteLine("Usage: --agents-inspect <name>");
+            }
             return 1;
         }
         String^ f = Path::Combine(p->AgentsDir, name + ".json");
         if (!File::Exists(f)) {
-            Console::WriteLine("Agent not found: " + name);
+            if (asJson) {
+                Console::WriteLine("{\"error\":\"Agent not found: " + JsonX::EscapeJson(name) + "\",\"path\":\"" + JsonX::EscapeJson(f) + "\"}");
+            } else {
+                Console::WriteLine("Agent not found: " + name);
+            }
             return 1;
         }
-        Console::WriteLine(File::ReadAllText(f));
+        if (asJson) {
+            // The file is already a JSON manifest. Re-serialize with
+            // WriteIndented=false so the output is a single line of JSON
+            // honoring docs/cli-json-contract.md. GetRawText() would
+            // preserve whatever whitespace the on-disk file used
+            // (typically pretty-printed by hand), which would break the
+            // single-line contract.
+            JsonDocument^ doc = JsonX::ReadFile(f);
+            if (doc == nullptr) {
+                Console::WriteLine("{\"error\":\"Invalid JSON in: " + JsonX::EscapeJson(f) + "\"}");
+                return 1;
+            }
+            JsonSerializerOptions^ inspectOpts = gcnew JsonSerializerOptions();
+            inspectOpts->WriteIndented = false;
+            Console::WriteLine(JsonSerializer::Serialize(doc->RootElement, inspectOpts));
+        } else {
+            // Text mode also dumps the JSON, but pretty-printed via the
+            // existing File::ReadAllText path. (No pretty-print in C++/CLI
+            // without an extra serializer call; the on-disk file is
+            // typically hand-formatted, so this is fine.)
+            Console::WriteLine(File::ReadAllText(f));
+        }
         return 0;
     }
 
     // -------------------------------------------------------------------------
     // Validate — required-field check on a path
     // -------------------------------------------------------------------------
-    int Commands::AgentsValidate(String^ file) {
+    int Commands::AgentsValidate(String^ file, bool asJson) {
         if (String::IsNullOrEmpty(file) || !File::Exists(file)) {
-            Console::WriteLine("Usage: --agents-validate <file.json>");
+            if (asJson) {
+                Console::WriteLine("{\"error\":\"--agents-validate requires an existing file\",\"path\":\"" + JsonX::EscapeJson(file == nullptr ? "" : file) + "\"}");
+            } else {
+                Console::WriteLine("Usage: --agents-validate <file.json>");
+            }
             return 1;
         }
         JsonDocument^ doc = JsonX::ReadFile(file);
         if (doc == nullptr) {
-            Console::WriteLine("Invalid: " + file);
+            if (asJson) {
+                Console::WriteLine("{\"file\":\"" + JsonX::EscapeJson(file) + "\",\"ok\":false,\"missing\":[],\"reason\":\"invalid JSON\"}");
+            } else {
+                Console::WriteLine("Invalid: " + file);
+            }
             return 1;
         }
         JsonElement root = doc->RootElement;
-        bool ok = JsonX::Has(root, "name")    &&
-                   JsonX::Has(root, "version") &&
-                   JsonX::Has(root, "kind")    &&
-                   JsonX::Has(root, "entry");
-        Console::WriteLine(ok ? ("Valid: " + file) : ("Invalid: " + file));
+        array<String^>^ required = gcnew array<String^> { "name", "version", "kind", "entry" };
+        List<String^>^ missing = gcnew List<String^>();
+        for each (String ^ k in required) {
+            if (!JsonX::Has(root, k)) missing->Add(k);
+        }
+        bool ok = missing->Count == 0;
+        if (asJson) {
+            StringBuilder^ sb = gcnew StringBuilder();
+            sb->Append("{\"file\":\""); sb->Append(JsonX::EscapeJson(file));
+            sb->Append("\",\"ok\":"); sb->Append(ok ? "true" : "false");
+            sb->Append(",\"missing\":[");
+            for (int i = 0; i < missing->Count; i++) {
+                if (i > 0) sb->Append(",");
+                sb->Append("\""); sb->Append(JsonX::EscapeJson(missing[i])); sb->Append("\"");
+            }
+            sb->Append("],\"reason\":\"");
+            sb->Append(ok ? "all required fields present" : "missing required fields");
+            sb->Append("\"}");
+            Console::WriteLine(sb->ToString());
+        } else {
+            Console::WriteLine(ok ? ("Valid: " + file) : ("Invalid: " + file));
+        }
         return ok ? 0 : 1;
     }
 
     // -------------------------------------------------------------------------
     // Trace — grep audit.jsonl for run_id
     // -------------------------------------------------------------------------
-    int Commands::AgentsTrace(Paths^ p, String^ runId) {
+    int Commands::AgentsTrace(Paths^ p, String^ runId, bool asJson) {
         if (String::IsNullOrEmpty(runId)) {
-            Console::WriteLine("Usage: --agents-trace <run_id>");
+            if (asJson) {
+                Console::WriteLine("{\"error\":\"--agents-trace requires a run_id\"}");
+            } else {
+                Console::WriteLine("Usage: --agents-trace <run_id>");
+            }
             return 1;
         }
         String^ log = Path::Combine(p->MemoryDir, "audit.jsonl");
         if (!File::Exists(log)) {
-            Console::WriteLine("(no audit log)");
+            if (asJson) {
+                Console::WriteLine("{\"run_id\":\"" + JsonX::EscapeJson(runId) + "\",\"entries\":[],\"total\":0,\"log\":\"" + JsonX::EscapeJson(log) + "\"}");
+            } else {
+                Console::WriteLine("(no audit log)");
+            }
             return 0;
         }
-        bool any = false;
+        List<String^>^ matching = gcnew List<String^>();
         for each (String ^ line in File::ReadAllLines(log)) {
-            if (line->Contains(runId)) {
-                Console::WriteLine(line);
-                any = true;
-            }
+            if (line->Contains(runId)) matching->Add(line);
         }
-        if (!any) Console::WriteLine("(no trace entries)");
+        if (asJson) {
+            // v0.3.11.1 (G56): re-serialize each matching audit.jsonl
+            // line with WriteIndented=false so the output is a single
+            // line of JSON. GetRawText() would preserve whatever
+            // whitespace the on-disk line used (Audit::Emit writes
+            // pretty-printed objects), which would break the
+            // single-line contract when the trace has >0 entries.
+            // Empty-trace (entries=[]) was already single-line, so
+            // G50 passed; G56 exercises a non-empty trace.
+            JsonSerializerOptions^ traceOpts = gcnew JsonSerializerOptions();
+            traceOpts->WriteIndented = false;
+            StringBuilder^ sb = gcnew StringBuilder();
+            sb->Append("{\"run_id\":\""); sb->Append(JsonX::EscapeJson(runId));
+            sb->Append("\",\"entries\":[");
+            for (int i = 0; i < matching->Count; i++) {
+                if (i > 0) sb->Append(",");
+                try {
+                    JsonDocument^ d = JsonDocument::Parse(matching[i]);
+                    sb->Append(JsonSerializer::Serialize(d->RootElement, traceOpts));
+                } catch (Exception^) {
+                    sb->Append("{\"raw\":\""); sb->Append(JsonX::EscapeJson(matching[i])); sb->Append("\"}");
+                }
+            }
+            sb->Append("],\"total\":"); sb->Append(matching->Count);
+            sb->Append(",\"log\":\""); sb->Append(JsonX::EscapeJson(log));
+            sb->Append("\"}");
+            Console::WriteLine(sb->ToString());
+            return 0;
+        }
+        for each (String ^ line in matching) {
+            Console::WriteLine(line);
+        }
+        if (matching->Count == 0) Console::WriteLine("(no trace entries)");
         return 0;
     }
 
     // -------------------------------------------------------------------------
     // Factory diff — one-line summary
     // -------------------------------------------------------------------------
-    int Commands::AgentsFactoryDiff(Paths^ p, String^ name) {
+    int Commands::AgentsFactoryDiff(Paths^ p, String^ name, bool asJson) {
         if (String::IsNullOrEmpty(name)) {
-            Console::WriteLine("Usage: --agents-factory-diff <name>");
+            if (asJson) {
+                Console::WriteLine("{\"error\":\"--agents-factory-diff requires a name\"}");
+            } else {
+                Console::WriteLine("Usage: --agents-factory-diff <name>");
+            }
             return 1;
         }
         String^ f = Path::Combine(p->AgentsDir, name + ".json");
         if (!File::Exists(f)) {
-            Console::WriteLine("Agent not found: " + name);
+            if (asJson) {
+                Console::WriteLine("{\"error\":\"Agent not found: " + JsonX::EscapeJson(name) + "\"}");
+            } else {
+                Console::WriteLine("Agent not found: " + name);
+            }
             return 1;
         }
         JsonDocument^ doc = JsonX::ReadFile(f);
-        if (doc == nullptr) return 1;
+        if (doc == nullptr) {
+            if (asJson) {
+                Console::WriteLine("{\"error\":\"Invalid JSON in: " + JsonX::EscapeJson(f) + "\"}");
+            }
+            return 1;
+        }
         JsonElement root = doc->RootElement;
         String^ ver  = JsonX::GetStrOr(root, "version", "?");
         String^ kind = JsonX::GetStrOr(root, "kind",    "?");
-        StringBuilder^ caps = gcnew StringBuilder();
+        List<String^>^ caps = gcnew List<String^>();
         JsonElement capsEl = JsonX::GetProp(root, "capabilities");
         if (capsEl.ValueKind == JsonValueKind::Array) {
-            bool first = true;
             for each (JsonElement c in capsEl.EnumerateArray()) {
-                if (!first) caps->Append(",");
-                caps->Append(c.GetString());
-                first = false;
+                String^ s = c.GetString();
+                if (s != nullptr) caps->Add(s);
             }
         }
+        if (asJson) {
+            StringBuilder^ sb = gcnew StringBuilder();
+            sb->Append("{\"name\":\""); sb->Append(JsonX::EscapeJson(name));
+            sb->Append("\",\"version\":\""); sb->Append(JsonX::EscapeJson(ver));
+            sb->Append("\",\"kind\":\""); sb->Append(JsonX::EscapeJson(kind));
+            sb->Append("\",\"capabilities\":[");
+            for (int i = 0; i < caps->Count; i++) {
+                if (i > 0) sb->Append(",");
+                sb->Append("\""); sb->Append(JsonX::EscapeJson(caps[i])); sb->Append("\"");
+            }
+            sb->Append("]}");
+            Console::WriteLine(sb->ToString());
+            return 0;
+        }
         Console::WriteLine(String::Format("{0} v{1} — kind={2} caps={3}",
-                                           name, ver, kind, caps->ToString()));
+                                           name, ver, kind, String::Join(",", caps->ToArray())));
         return 0;
     }
 

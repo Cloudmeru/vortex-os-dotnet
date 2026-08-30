@@ -973,4 +973,127 @@ namespace Vortex {
         }
         return full;
     }
+
+    // ---------------------------------------------------------------------
+    // ReadForInjectionJson (v0.3.10, Phase 1 / G32)
+    // ---------------------------------------------------------------------
+    // Returns the same data as ReadForInjection but as a single-line JSON
+    // object per docs/cli-json-contract.md. The text form above is
+    // unchanged and is still the source of truth for prompt injection;
+    // this method exists so PS / Python / Go shims and CI scripts can
+    // consume the memory slice without re-parsing markdown.
+    //
+    // Each sub-object (operator / prior_projects[*] / series) is the
+    // *parsed* JSON of the underlying derived artifact, not raw text.
+    // Missing files are emitted as `null` (operator, series) or `[]`
+    // (prior_projects) so the schema is stable regardless of which
+    // memory artifacts have been compiled yet.
+    String^ Memory::ReadForInjectionJson(Paths^ p, String^ projectName) {
+        if (p == nullptr) {
+            return "{\"error\":\"paths is null\"}";
+        }
+        String^ root = DerivedRoot(p);
+        if (!Directory::Exists(root)) {
+            return "{\"project\":\"" + JsonX::EscapeJson(projectName == nullptr ? "" : projectName) +
+                   "\",\"truncated\":false,\"chars\":0,\"operator\":null,\"prior_projects\":[],\"series\":null}";
+        }
+
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"project\":\""); sb->Append(JsonX::EscapeJson(projectName == nullptr ? "" : projectName));
+        sb->Append("\"");
+
+        // operator
+        sb->Append(",\"operator\":");
+        // v0.3.11.1 (G32, latent-bug fix): re-serialize with
+        // WriteIndented=false so the embedded operator JSON is always
+        // a single line. The on-disk operator.json is currently
+        // written single-line by Memory::CompileOperator, so GetRawText()
+        // would work today -- but the contract says --json mode MUST
+        // emit a single line of JSON, and that's a property of THIS
+        // function, not of the on-disk format. Re-serialize defensively.
+        if (File::Exists(OperatorFile(p))) {
+            try {
+                String^ op = File::ReadAllText(OperatorFile(p))->Trim();
+                JsonDocument^ d = JsonDocument::Parse(op);
+                if (d != nullptr) {
+                    JsonSerializerOptions^ memOpts = gcnew JsonSerializerOptions();
+                    memOpts->WriteIndented = false;
+                    sb->Append(JsonSerializer::Serialize(d->RootElement, memOpts));
+                }
+                else sb->Append("null");
+            } catch (Exception^) { sb->Append("null"); }
+        } else {
+            sb->Append("null");
+        }
+
+        // prior_projects (one entry: the most-recent prior project in the same series)
+        sb->Append(",\"prior_projects\":[");
+        String^ series = DetectSeries(projectName);
+        if (!String::IsNullOrEmpty(series)) {
+            String^ pdir = ProjectDir(p);
+            if (Directory::Exists(pdir)) {
+                String^ bestMatch = "";
+                int bestTs = 0;
+                array<String^>^ files = Directory::GetFiles(pdir, "*.json");
+                for each (String ^ f in files) {
+                    String^ other = Path::GetFileNameWithoutExtension(f);
+                    if (String::IsNullOrEmpty(projectName) || other == projectName) continue;
+                    String^ otherSeries = DetectSeries(other);
+                    if (otherSeries != series) continue;
+                    try {
+                        String^ c = File::ReadAllText(f);
+                        int ts = Int32::Parse(ExtractNumber(c, "compiled_at"));
+                        if (ts > bestTs) { bestTs = ts; bestMatch = other; }
+                    } catch (Exception^) {}
+                }
+                if (!String::IsNullOrEmpty(bestMatch)) {
+                    String^ projectPath = ProjectFile(p, bestMatch);
+                    if (File::Exists(projectPath)) {
+                        try {
+                            String^ c = File::ReadAllText(projectPath)->Trim();
+                            JsonDocument^ d = JsonDocument::Parse(c);
+                            if (d != nullptr) {
+                                JsonSerializerOptions^ memOpts = gcnew JsonSerializerOptions();
+                                memOpts->WriteIndented = false;
+                                sb->Append(JsonSerializer::Serialize(d->RootElement, memOpts));
+                            }
+                        } catch (Exception^) {}
+                    }
+                }
+            }
+        }
+        sb->Append("]");
+
+        // series
+        sb->Append(",\"series\":");
+        if (!String::IsNullOrEmpty(series)) {
+            String^ seriesPath = SeriesFile(p, series);
+            if (File::Exists(seriesPath)) {
+                try {
+                    String^ c = File::ReadAllText(seriesPath)->Trim();
+                    JsonDocument^ d = JsonDocument::Parse(c);
+                    if (d != nullptr) {
+                        JsonSerializerOptions^ memOpts = gcnew JsonSerializerOptions();
+                        memOpts->WriteIndented = false;
+                        sb->Append(JsonSerializer::Serialize(d->RootElement, memOpts));
+                    }
+                    else sb->Append("null");
+                } catch (Exception^) { sb->Append("null"); }
+            } else {
+                sb->Append("null");
+            }
+        } else {
+            sb->Append("null");
+        }
+
+        // chars + truncated (mirrors ReadForInjection's budget logic)
+        const int kMaxTokens = 4000;
+        const int kMaxChars = kMaxTokens * 4;
+        String^ full = ReadForInjection(p, projectName);
+        sb->Append(",\"chars\":"); sb->Append(full->Length);
+        sb->Append(",\"truncated\":"); sb->Append(full->Length > kMaxChars ? "true" : "false");
+
+        sb->Append("}");
+        return sb->ToString();
+    }
 }
