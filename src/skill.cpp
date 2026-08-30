@@ -658,7 +658,7 @@ static int CmdBudgetSet(Paths^ p, String^ project, long tokensTotal, double usdT
     if (asJson) {
         StringBuilder^ sb = gcnew StringBuilder();
         sb->Append("{\"project\":\""); sb->Append(JsonX::EscapeJson(project));
-        sb->Append("\",\"tokens_total\":"); sb->Append(tokensTotal);
+        sb->Append("\",\"tokens_total\":"); sb->Append((int)tokensTotal);
         sb->Append(",\"usd_total\":");
         sb->Append(usdTotal.ToString("F6", System::Globalization::CultureInfo::InvariantCulture));
         sb->Append("}");
@@ -691,7 +691,7 @@ static int CmdBudgetShow(Paths^ p, String^ project, bool asJson) {
     if (asJson) {
         StringBuilder^ sb = gcnew StringBuilder();
         sb->Append("{\"project\":\""); sb->Append(JsonX::EscapeJson(project));
-        sb->Append("\",\"tokens_total\":"); sb->Append(tokensTotal);
+        sb->Append("\",\"tokens_total\":"); sb->Append((int)tokensTotal);
         sb->Append(",\"usd_total\":"); sb->Append(usdTotal.ToString("F6", System::Globalization::CultureInfo::InvariantCulture));
         sb->Append(",\"so_far\":{");
         sb->Append("\"usd\":"); sb->Append(soFar.ToString("F6", System::Globalization::CultureInfo::InvariantCulture));
@@ -1466,7 +1466,14 @@ static int CmdTeamConfig(Paths^ p, bool asJson) {
         if (doc == nullptr) {
             sb->Append("null");
         } else {
-            sb->Append(doc->RootElement.GetRawText());
+            // v0.3.11 (G36): re-serialize the config with WriteIndented=false
+            // so the output is always a single line of JSON. GetRawText()
+            // would preserve whatever whitespace the on-disk file used
+            // (PowerShell's ConvertTo-Json defaults to multi-line), and
+            // that would break the single-line contract in --json mode.
+            JsonSerializerOptions^ cfgOpts = gcnew JsonSerializerOptions();
+            cfgOpts->WriteIndented = false;
+            sb->Append(JsonSerializer::Serialize(doc->RootElement, cfgOpts));
         }
         sb->Append(",\"paths\":{");
         sb->Append("\"state_dir\":\"");            sb->Append(JsonX::EscapeJson(p->StateDir));            sb->Append("\",");
@@ -1548,7 +1555,7 @@ static int CmdStreamList(Paths^ p, bool asJson) {
             if (!first) sb->Append(",");
             first = false;
             sb->Append("{\"task_id\":\"" + JsonX::EscapeJson(taskId) + "\"");
-            sb->Append(",\"started_at\":"); sb->Append(startedAt);
+            sb->Append(",\"started_at\":"); sb->Append((int)startedAt);
             sb->Append(",\"partials\":"); sb->Append(partials);
             sb->Append("}");
         }

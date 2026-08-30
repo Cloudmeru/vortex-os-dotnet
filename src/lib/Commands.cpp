@@ -222,14 +222,20 @@ namespace Vortex {
             return 1;
         }
         if (asJson) {
-            // The file is already a JSON manifest. Parse + emit GetRawText
-            // so the schema is exactly what the agent author wrote.
+            // The file is already a JSON manifest. Re-serialize with
+            // WriteIndented=false so the output is a single line of JSON
+            // honoring docs/cli-json-contract.md. GetRawText() would
+            // preserve whatever whitespace the on-disk file used
+            // (typically pretty-printed by hand), which would break the
+            // single-line contract.
             JsonDocument^ doc = JsonX::ReadFile(f);
             if (doc == nullptr) {
                 Console::WriteLine("{\"error\":\"Invalid JSON in: " + JsonX::EscapeJson(f) + "\"}");
                 return 1;
             }
-            Console::WriteLine(doc->RootElement.GetRawText());
+            JsonSerializerOptions^ inspectOpts = gcnew JsonSerializerOptions();
+            inspectOpts->WriteIndented = false;
+            Console::WriteLine(JsonSerializer::Serialize(doc->RootElement, inspectOpts));
         } else {
             // Text mode also dumps the JSON, but pretty-printed via the
             // existing File::ReadAllText path. (No pretty-print in C++/CLI
