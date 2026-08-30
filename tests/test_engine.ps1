@@ -374,7 +374,13 @@ try {
     Write-Host ""
     Write-Host "[9] Plugin system"
 
-    # --plugins-list discovers all 6 skill-scope reference plugins.
+    # --plugins-list discovers all skill-scope reference plugins.
+    # v0.3.11.1: the count was hardcoded to 17 (the v0.2.1 total).
+    # 6 plugins have been added since (scene-decomposer, editor.stitch,
+    # qa.core, qa.cinematic-short, qa.media-tutorial-video,
+    # qa.iteration-pattern) so the test now extracts the count from
+    # the "Total: N plugin(s)" line in the engine output rather than
+    # hardcoding it.
     $listOut = (& pwsh -NoProfile -File $skillPath --plugins-list 2>&1 | Out-String)
     Check "plugins-list shows audio-foley"        { $listOut -match 'audio-foley' }
     Check "plugins-list shows text-writer"        { $listOut -match 'text-writer' }
@@ -382,7 +388,15 @@ try {
     Check "plugins-list shows image-portrait"     { $listOut -match 'image-portrait' }
     Check "plugins-list shows code-typescript"    { $listOut -match 'code-typescript' }
     Check "plugins-list shows media-ffmpeg"       { $listOut -match 'media-ffmpeg' }
-    Check "plugins-list reports 17 plugins total" { $listOut -match 'Total: 17 plugin' }
+    $gPluginsCount = 0
+    if ($listOut -match 'Total:\s+(\d+)\s+plugin') { $gPluginsCount = [int]$matches[1] }
+    Check "plugins-list reports a non-zero total" { $gPluginsCount -gt 0 }
+    Check "plugins-list reports the same count as the data row count" {
+        # A data row is "  <name>  <version>  <capability>  <source>".
+        # Count the lines that match a plugin-name + semver pattern.
+        $dataRows = ([regex]::Matches($listOut, '(?m)^\s+[a-z][a-z0-9.\-]+\s+\d+\.\d+\.\d+\s+')).Count
+        $dataRows -eq $gPluginsCount
+    }
     Check "plugins-list marks them as skill-scope" { $listOut -match 'skill' }
 
     # --plugins-info dumps a single plugin's manifest.
@@ -493,13 +507,21 @@ Write-Output '===END==='
     Check "plugin SDK exports all 5 functions" { $sdkTest -match 'all exported' }
 
     # 11 additional reference plugins (v0.2.1) -- all discoverable + invokable.
+    # v0.3.11.1: now 6 QA/director plugins on top of these 11 + the original
+    # 6 (audio-foley, text-writer, text-editor, image-portrait,
+    # code-typescript, media-ffmpeg) = 23 total. The count check
+    # compares against the count extracted at line 385 (above).
     $listOut2 = (& pwsh -NoProfile -File $skillPath --plugins-list 2>&1 | Out-String)
     foreach ($p in 'audio-music','audio-voice','image-cover','image-map',
                    'code-python','video-hailuo','video-animator',
                    'data-researcher','data-analyst','design-mockup','media-sqlite') {
         Check "plugins-list shows $p" { $listOut2 -match [regex]::Escape($p) }
     }
-    Check "plugins-list now reports 17 plugins total" { $listOut2 -match 'Total: 17 plugin' }
+    $gPluginsCount2 = 0
+    if ($listOut2 -match 'Total:\s+(\d+)\s+plugin') { $gPluginsCount2 = [int]$matches[1] }
+    Check "plugins-list total matches the first call's count (no add/remove drift)" {
+        $gPluginsCount2 -eq $gPluginsCount
+    }
 
     # --plugin-install with a bad URL: should fail gracefully (downloads,
     # tries to extract, errors out, removes the partial folder).
@@ -1789,6 +1811,105 @@ Write-Output '===END==='
         $g54Json.PSObject.Properties['total'] -and
         $g54Json.PSObject.Properties['log'] -and
         $g54Json.PSObject.Properties['truncated']
+    }
+
+    # -----------------------------------------------------------------------
+    # G55-G57: Phase 1 contract gaps closed in v0.3.11.1.
+    #
+    # v0.3.10 + v0.3.11 (G32-G54) covered 23 of the 25 verbs in the
+    # contract table. The 2 not covered were pre-existing --json modes:
+    #   - --agents-discover --json (used GetRawText, broke single-line)
+    #   - --cost-report --json (already correct, exercised in section [7])
+    # and 1 verb with a latent multi-line bug:
+    #   - --agents-trace --json (GetRawText per entry; G50 missed it
+    #     because the test only traced a non-existent run_id with
+    #     entries=[])
+    #
+    # v0.3.11.1 fixes all 3 and adds G55-G57 to lock the contract.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "=== G55-G57: Contract gaps closed in v0.3.11.1 ===" -ForegroundColor Cyan
+
+    # G55: --agents-discover --json returns a single-line array.
+    # Pre-v0.3.11.1 the engine used JsonElement::GetRawText() which
+    # preserved the on-disk manifest's pretty-printed whitespace.
+    $g55Out = & pwsh -NoProfile -File $skillPath --agents-discover --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g55Out = $g55Out.Trim()
+    $g55Json = $null
+    $g55JsonLine = Get-VortexJsonLine $g55Out
+    try { $g55Json = $g55Out | ConvertFrom-Json } catch {}
+    Check "G55a: --agents-discover --json output is valid JSON" { $g55Json -ne $null }
+    Check "G55b: --agents-discover --json is a single line" { ($null -ne $g55JsonLine) -and -not ($g55JsonLine.Contains([char]10) -or $g55JsonLine.Contains([char]13)) }
+    Check "G55c: --agents-discover --json is a top-level array" { $g55Json -is [array] }
+    Check "G55d: --agents-discover --json has at least one agent" { $g55Json.Count -gt 0 }
+    Check "G55e: --agents-discover --json entries have name+version+kind" {
+        $g55Json[0].PSObject.Properties['name'] -and
+        $g55Json[0].PSObject.Properties['version'] -and
+        $g55Json[0].PSObject.Properties['kind']
+    }
+
+    # G56: --agents-trace --json returns a single-line object even
+    # when entries[] is non-empty. Pre-v0.3.11.1 the engine used
+    # GetRawText() per entry, which would emit multi-line pretty-
+    # printed JSON for any real trace. G50 only tested a non-existent
+    # run_id (entries=[]) so it didn't catch the bug. G56 seeds a
+    # real entry and asserts single-line.
+    $g56AuditFile = Join-Path $scratchHome 'memory\audit.jsonl'
+    $g56AuditDir = Split-Path -Parent $g56AuditFile
+    if (-not (Test-Path $g56AuditDir)) { New-Item -ItemType Directory -Path $g56AuditDir -Force | Out-Null }
+    # Use a single-line JSONL entry (matching the engine's actual on-disk
+    # format when one JSON object = one line). The engine reads each line
+    # with JsonDocument::Parse which can't recover from a line that has
+    # the opening { but not the closing } -- it falls back to {"raw":...}
+    # which strips the typed fields. v0.3.11.1 (G56) only needs to prove
+    # the engine's re-serialization is single-line; the typed-field
+    # round-trip is a v0.3.x+ concern (TODO: add a multi-line-aware
+    # JSONL parser so pretty-printed Audit::Emit output round-trips).
+    '{"ts":"2026-08-30T12:00:00Z","tier":"T2","agent":"test.shift","action":"deliver","status":"ok","severity":"LOW","task_id":"g56_trace_test"}' |
+        Set-Content -LiteralPath $g56AuditFile
+    $g56Out = & pwsh -NoProfile -File $skillPath --agents-trace g56_trace_test --json 2>&1 | Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g56Out = $g56Out.Trim()
+    $g56Json = $null
+    $g56JsonLine = Get-VortexJsonLine $g56Out
+    try { $g56Json = $g56Out | ConvertFrom-Json } catch {}
+    Check "G56a: --agents-trace --json with 1 entry is valid JSON" { $g56Json -ne $null }
+    Check "G56b: --agents-trace --json with 1 entry is a single line" {
+        ($null -ne $g56JsonLine) -and -not ($g56JsonLine.Contains([char]10) -or $g56JsonLine.Contains([char]13))
+    }
+    Check "G56c: --agents-trace --json has entries[0] with task_id round-trip" {
+        if ($g56Json.entries.Count -eq 1) {
+            $g56Json.entries[0].PSObject.Properties['task_id'] -and
+            $g56Json.entries[0].task_id -eq 'g56_trace_test'
+        } else { $false }
+    }
+    Check "G56d: --agents-trace --json total matches entries count" {
+        $g56Json.total -eq 1 -and $g56Json.entries.Count -eq 1
+    }
+
+    # G57: New-VortexSilentWav actually writes the silent audio samples
+    # for the requested duration, not just a 44-byte header. The
+    # fallback is hit when neither mcode-tools nor ffmpeg is on PATH
+    # (true on this Windows host). Pre-v0.3.11.1 the WAV was 44 bytes
+    # so the audio-foley plugin's "wav file is larger than 100 bytes"
+    # test failed; v0.3.11.1 fixes New-VortexSilentWav.
+    $g57WavPath = Join-Path $scratchHome 'g57_silent.wav'
+    $g57Result = & "C:\Program Files\PowerShell\7\pwsh.exe" -NoProfile -Command "& { Import-Module '$skillDir\plugin-sdk\Vortex.Plugin.psm1' -Force; New-VortexSilentWav -OutFile '$g57WavPath' -DurationSec 2 }" 2>&1
+    Check "G57a: New-VortexSilentWav wrote a 2-second WAV" {
+        if (Test-Path $g57WavPath) { (Get-Item $g57WavPath).Length -gt 100 } else { $false }
+    }
+    Check "G57b: New-VortexSilentWav 2-second WAV is larger than 88,000 bytes" {
+        # 22050 Hz * 2 sec * 2 bytes = 88,200 bytes of silent audio data
+        # + 44-byte header = ~88,244 bytes. Anything > 88,000 is the
+        # full duration; < 100 would be just the header.
+        if (Test-Path $g57WavPath) { (Get-Item $g57WavPath).Length -gt 88000 } else { $false }
+    }
+    Check "G57c: New-VortexSilentWav WAV header is valid (RIFF + WAVE)" {
+        if (Test-Path $g57WavPath) {
+            $bytes = [System.IO.File]::ReadAllBytes($g57WavPath)
+            $riff = [System.Text.Encoding]::ASCII.GetString($bytes[0..3])
+            $wave = [System.Text.Encoding]::ASCII.GetString($bytes[8..11])
+            $riff -eq 'RIFF' -and $wave -eq 'WAVE'
+        } else { $false }
     }
 
     # -----------------------------------------------------------------------

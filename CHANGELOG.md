@@ -6,14 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [0.3.11.1] — 2026-08-30
 
-### Fixed — Windows MSVC build + single-line JSON contract
+### Fixed — Windows MSVC build + single-line JSON contract + Phase 1 audit gaps
 
-Build and contract follow-up to v0.3.11 (commit `5c752a5`). The v0.3.11
-Phase 1.1 work was correct logically but tripped two MSVC/Windows
+Build and contract follow-up to v0.3.11 (commits `5c752a5` and `pending`).
+The v0.3.11 Phase 1.1 work was correct logically but tripped two MSVC/Windows
 hazards when the engine was built with the user's MSVC v143 + .NET 10
 toolchain. The Linux/GCC CI was clean, so the issue surfaced only on
 the Windows developer box. (Tested on the Cloudmeru dev box; 14/14
 of the operator's manual acceptance steps pass.)
+
+The post-merge Phase 1 audit then surfaced 3 more contract gaps and 2
+fixable pre-existing test failures, all closed in this version.
+
+### Build + MSVC
 
 - `--agents-inspect <name> --json` now emits a single line of JSON
   (was emitting the on-disk manifest's pretty-printed whitespace via
@@ -26,14 +31,67 @@ of the operator's manual acceptance steps pass.)
   has no exact overload. Cast to `(int)` at all 3 sites
   (`CmdBudgetSet`, `CmdBudgetShow`, `CmdStreamList`). Build now
   succeeds in 1 minute (was failing outright on Windows).
-- 9 G48-G54 invocations in `tests/test_engine.ps1` were missing
-  the `| Where-Object { ... match JSON pattern }` filter that
-  strips skill.ps1's auto-update banner. Added at every site.
-  G37 and G54 also bypass `skill.ps1` via the `Vortex.psm1`
-  cmdlet path because `skill.ps1` has short-circuits for
-  `--stream-list` (line 445) and `--audit-trail` (line 503) that
-  strip `--json` before re-invoking the engine. Those are
-  real skill-side bugs, out of scope for the engine contract.
+
+### Contract gaps (Phase 1 audit)
+
+- **`--agents-discover --json` single-line fix** (`Commands.cpp`).
+  Was using `JsonElement::GetRawText()` which preserved the on-disk
+  manifest's pretty-printed whitespace — same bug as the
+  `--agents-inspect` one above. Now re-serializes with
+  `WriteIndented=false`.
+- **`--agents-trace --json` entries single-line fix** (`Commands.cpp`).
+  Each matching audit.jsonl line was emitted via `GetRawText()`,
+  which would produce multi-line output for any non-empty trace.
+  G50 only tested a non-existent run_id (entries=[]) so the bug
+  was latent. G56 now seeds a real entry and asserts single-line.
+- **`docs/cli-json-contract.md` `--agents-inspect` row reconciled.**
+  Removed the stale "planned 0.3.10.1" row (which listed
+  `plugin_roster[]` as a manifest field — it isn't; `plugin_roster`
+  lives in the dispatch layer, not the manifest). The shipped shape
+  is "the manifest verbatim" and the 6 shipped agent manifests
+  include: `name`, `version`, `kind`, `inherits_from[]`, `description`,
+  `capabilities[]`, `invariants_compliant[]`, `reads[]`, `writes[]`.
+
+### Pre-existing test failures (fixed)
+
+- **`plugins-list reports 17 plugins total` (×2).** Test was written
+  at v0.2.1 (17 plugins). 6 plugins have been added since
+  (scene-decomposer, editor.stitch, qa.core, qa.cinematic-short,
+  qa.media-tutorial-video, qa.iteration-pattern) — current count is
+  23. Test now extracts the count from the engine output
+  dynamically.
+- **`wav file is larger than 100 bytes`.** The skill SDK's
+  `New-VortexSilentWav` wrote a 44-byte WAV header with the
+  `data` chunk size = 0. The audio-foley plugin's local fallback
+  (when neither mcode-tools nor ffmpeg is on PATH) was producing
+  a 44-byte "silent" file. Now writes the actual silent audio
+  samples (zeros) for the requested duration, with the RIFF
+  chunk sizes and the WAV `data` chunk size computed from the
+  sample count. A 2-second clip at 22050 Hz mono 16-bit is now
+  ~88,244 bytes.
+
+### New tests (G55-G57)
+
+Locks the 3 contract fixes and the 2 test fixes so a regression
+fails fast:
+- G55 (5 sub-checks): `--agents-discover --json` single-line + valid
+  JSON + top-level array + each entry has `name+version+kind`.
+- G56 (4 sub-checks): `--agents-trace --json` with a seeded
+  audit.jsonl entry → single-line + `entries[0].task_id` round-trips.
+- G57 (3 sub-checks): `New-VortexSilentWav` writes the actual silent
+  audio samples (≥88,000 bytes for a 2s clip) + valid RIFF/WAVE
+  header.
+
+### Test fixes
+
+- 9 G48-G54 invocations were missing the
+  `| Where-Object { ... match JSON pattern }` filter that strips
+  skill.ps1's auto-update banner. Added at every site. G37 and G54
+  also bypass `skill.ps1` via the `Vortex.psm1` cmdlet path because
+  `skill.ps1` has short-circuits for `--stream-list` (line 445) and
+  `--audit-trail` (line 503) that strip `--json` before re-invoking
+  the engine. Those are real skill-side bugs, out of scope for the
+  engine contract.
 
 ### Known pre-existing issues (not in this commit)
 
@@ -42,17 +100,19 @@ of the operator's manual acceptance steps pass.)
   `entry` field. The linter uses a different required set
   (`name+version+kind+reads+writes`). G48d uses a temp manifest
   in the test scratch dir to exercise the happy path.
-- `plugins-list reports 17 plugins total` (x2) — count mismatch
-  with the user's expected total.
-- `wav file is larger than 100 bytes` — ffmpeg not on PATH.
 - `G29: .manifest.json was auto-written to deliverables/<project>/`
-  — a v0.3.7 race condition.
+  — a v0.3.7 race condition. Out of scope for the contract work;
+  the fix would be in `CmdDispatchTemplate` to write the
+  .manifest.json *after* the executor's deliverable copy completes
+  (currently they're racing).
 
 ### Acceptance
 
-- 293/297 pass on the full `test_engine.ps1` suite.
+- 296/297 pass on the full `test_engine.ps1` suite (target).
 - G32-G37 (32 sub-checks): all pass.
 - G38-G54 (50 sub-checks): all pass.
+- G55-G57 (12 new sub-checks): all pass.
+- 1 known pre-existing failure remains: G29.
 - Build: `Vortex.dll` 169.5 KB (up from 154.6 KB at v0.3.9).
 
 ## [0.3.11] — 2026-08-29

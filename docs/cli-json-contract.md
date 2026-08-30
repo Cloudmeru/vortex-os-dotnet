@@ -126,7 +126,6 @@ changelog.
 | Verb | Top-level shape | Key fields |
 |---|---|---|
 | `--agents-discover --json` | **array** of agent objects | `name`, `version`, `kind`, `capabilities[]` |
-| `--agents-inspect --json` (planned 0.3.10.1) | object | `name`, `version`, `kind`, `inherits_from[]`, `reads`, `writes`, `plugin_roster[]` |
 | `--cost-report --json` | object | `since_unix`, `grand_total{dispatches,tokens,cost_usd}`, `projects[]` |
 | `--memory-show --json` (0.3.10) | object | `project`, `operator{...}`, `prior_projects[]`, `chars` |
 | `--budget-show --json` (0.3.10) | object | `project`, `tokens_total`, `usd_total`, `so_far{tokens,usd}`, `percent_used` |
@@ -143,7 +142,7 @@ changelog.
 | `--plugin-install --json` (0.3.11) | object | `plugin`, `path`, `tarball_url`, `size_bytes`, `entry` |
 | `--plugin-remove --json` (0.3.11) | object | `plugin`, `path` |
 | `--decision-record --json` (0.3.11) | object | `task_id`, `gate`, `severity`, `choice`, `reason`, `episode_number`, `index` |
-| `--agents-inspect --json` (0.3.11) | object | the manifest (verbatim) |
+| `--agents-inspect --json` (0.3.11) | object | the manifest (verbatim) -- fields depend on the manifest author. Current shipped manifests (`supervisor.store`, `supervisor.shift`, `director.cinematic`, `media-stack`, `reviewer.quality`, `inspector.governance`) include: `name`, `version`, `kind`, `inherits_from[]`, `description`, `capabilities[]`, `invariants_compliant[]`, `reads[]`, `writes[]`. `plugin_roster` is NOT a manifest field (it lives in the dispatch layer) so it's omitted from the inspect output. |
 | `--agents-validate --json` (0.3.11) | object | `file`, `ok`, `missing[]`, `reason` |
 | `--agents-lint --json` (0.3.11) | object | `results[{file,ok,reason}]`, `pass`, `fail` |
 | `--agents-trace --json` (0.3.11) | object | `run_id`, `entries[]`, `total`, `log` |

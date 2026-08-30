@@ -44,11 +44,19 @@ namespace Vortex {
         }
 
         if (outputJson) {
+            // v0.3.11.1 (G55): re-serialize each agent manifest with
+            // WriteIndented=false so the output is a single line of JSON
+            // honoring docs/cli-json-contract.md. GetRawText() would
+            // preserve whatever whitespace the on-disk manifest used
+            // (typically pretty-printed by hand), which would break
+            // the single-line contract.
+            JsonSerializerOptions^ discoverOpts = gcnew JsonSerializerOptions();
+            discoverOpts->WriteIndented = false;
             StringBuilder^ sb = gcnew StringBuilder();
             sb->Append("[");
             for (int i = 0; i < discovered->Count; i++) {
                 if (i > 0) sb->Append(",");
-                sb->Append(discovered[i].GetRawText());
+                sb->Append(JsonSerializer::Serialize(discovered[i], discoverOpts));
             }
             sb->Append("]");
             Console::WriteLine(sb->ToString());
@@ -319,6 +327,16 @@ namespace Vortex {
             if (line->Contains(runId)) matching->Add(line);
         }
         if (asJson) {
+            // v0.3.11.1 (G56): re-serialize each matching audit.jsonl
+            // line with WriteIndented=false so the output is a single
+            // line of JSON. GetRawText() would preserve whatever
+            // whitespace the on-disk line used (Audit::Emit writes
+            // pretty-printed objects), which would break the
+            // single-line contract when the trace has >0 entries.
+            // Empty-trace (entries=[]) was already single-line, so
+            // G50 passed; G56 exercises a non-empty trace.
+            JsonSerializerOptions^ traceOpts = gcnew JsonSerializerOptions();
+            traceOpts->WriteIndented = false;
             StringBuilder^ sb = gcnew StringBuilder();
             sb->Append("{\"run_id\":\""); sb->Append(JsonX::EscapeJson(runId));
             sb->Append("\",\"entries\":[");
@@ -326,7 +344,7 @@ namespace Vortex {
                 if (i > 0) sb->Append(",");
                 try {
                     JsonDocument^ d = JsonDocument::Parse(matching[i]);
-                    sb->Append(d->RootElement.GetRawText());
+                    sb->Append(JsonSerializer::Serialize(d->RootElement, traceOpts));
                 } catch (Exception^) {
                     sb->Append("{\"raw\":\""); sb->Append(JsonX::EscapeJson(matching[i])); sb->Append("\"}");
                 }
