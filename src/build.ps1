@@ -141,6 +141,7 @@ $fuList = @(
     'System.Text.RegularExpressions.dll',
     'System.Globalization.dll',
     'System.Threading.dll',
+    'System.Threading.Thread.dll',
     'System.Linq.dll',
     'System.ObjectModel.dll',
     'System.Reflection.dll',

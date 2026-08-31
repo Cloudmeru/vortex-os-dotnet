@@ -1616,70 +1616,474 @@ static int CmdStreamList(Paths^ p, bool asJson) {
 // This is the engine-side stub: it lists the .partial files and prints
 // their paths. The skill shell's Vortex.Streamer.psm1 does the actual
 // FileSystemWatcher + interactive y/n/q prompt.
-static int CmdStream(Paths^ p, String^ taskId, bool autoOpen) {
+// Emit one JSON event line. Helper for --stream --json (NDJSON). The
+// caller is responsible for including the trailing newline (Console::WriteLine
+// adds one). We deliberately use Console::WriteLine (not Write) so the
+// line is flushed immediately; the consumer's tail -f / ConvertFrom-Json
+// loop gets each event as soon as the watcher sees it.
+static void EmitStreamEvent(Paths^ p, String^ taskId, String^ event,
+                           StringBuilder^ extra, String^ errorMsg) {
+    StringBuilder^ sb = gcnew StringBuilder();
+    sb->Append("{\"event\":\""); sb->Append(event);
+    sb->Append("\",\"task_id\":\""); sb->Append(JsonX::EscapeJson(taskId));
+    sb->Append("\"");
+    if (extra != nullptr) {
+        sb->Append(",");
+        sb->Append(extra->ToString());
+    }
+    if (!String::IsNullOrEmpty(errorMsg)) {
+        sb->Append(",\"error\":\"");
+        sb->Append(JsonX::EscapeJson(errorMsg));
+        sb->Append("\"");
+    }
+    sb->Append("}");
+    Console::WriteLine(sb->ToString());
+}
+
+// Read the <taskId>/.started manifest and return its started_at field
+// as a Unix-seconds long. Returns 0 if the file is missing or malformed.
+static long ReadStartedAt(String^ taskDir) {
+    try {
+        String^ started = Path::Combine(taskDir, ".started");
+        if (!File::Exists(started)) return 0;
+        JsonDocument^ doc = JsonX::ReadFile(started);
+        if (doc == nullptr) return 0;
+        return JsonX::GetLong(doc->RootElement, "started_at", 0);
+    } catch (Exception^) { return 0; }
+}
+
+// Read <taskId>/.hints.jsonl and return the number of lines.
+static int CountHintLines(String^ taskDir) {
+    try {
+        String^ hints = Path::Combine(taskDir, ".hints.jsonl");
+        if (!File::Exists(hints)) return 0;
+        return File::ReadAllLines(hints)->Length;
+    } catch (Exception^) { return 0; }
+}
+
+// --stream <task_id> [--auto-open] [--json]
+//
+// v0.3.12 (Phase 2a): --json mode emits NDJSON (one event per line)
+// per docs/cli-streaming-contract.md. Text mode is unchanged.
+//
+// Implementation: poll the in_progress/<taskId>/ directory every 250ms
+// and detect new files. This is intentionally simple -- FileSystemWatcher
+// has cross-thread quirks in C++/CLI and 250ms latency is fine for an
+// operator-facing tool. When a terminal event is observed, the loop
+// exits.
+static int CmdStream(Paths^ p, String^ taskId, bool autoOpen, bool asJson) {
     String^ dir = Path::Combine(p->InProgressDir, taskId);
     if (!Directory::Exists(dir)) {
-        ConsoleX::Err("In-progress dir not found: " + dir);
-        ConsoleX::Err("Is the dispatch running? Try --stream-list to see what's in progress.");
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"In-progress dir not found\",\"path\":\"" +
+                JsonX::EscapeJson(dir) + "\"}");
+        } else {
+            ConsoleX::Err("In-progress dir not found: " + dir);
+            ConsoleX::Err("Is the dispatch running? Try --stream-list to see what's in progress.");
+        }
         return 2;
     }
-    Console::WriteLine("  [stream] attached to " + taskId);
-    Console::WriteLine("  In-progress: " + dir);
-    int count = 0;
-    for each (String^ f in Directory::GetFiles(dir)) {
-        String^ name = Path::GetFileName(f);
-        if (name->StartsWith(".")) continue;
-        if (!name->Contains(".partial")) continue;
-        long long size = 0;
-        {
-            FileInfo^ fi = gcnew FileInfo(f);
-            if (fi->Exists) size = (long long)fi->Length;
-        }
-        Console::WriteLine("  [stream] ready: {0,-30}  {1,8} bytes", name, size);
-        count++;
+
+    // Pre-load the audit.jsonl byte count so we can detect new lines.
+    String^ auditPath = Path::Combine(p->MemoryDir, "audit.jsonl");
+    long long auditStart = 0;
+    try { if (File::Exists(auditPath)) { FileInfo^ fi = gcnew FileInfo(auditPath); auditStart = fi->Length; } }
+    catch (Exception^) {}
+
+    // Emit the initial state.
+    long startedAt = ReadStartedAt(dir);
+    if (asJson) {
+        StringBuilder^ extra = gcnew StringBuilder();
+        extra->Append("\"started_at\":");
+        extra->Append((Int64)startedAt);
+        // Read the agent from .started if present.
+        try {
+            String^ startedFile = Path::Combine(dir, ".started");
+            if (File::Exists(startedFile)) {
+                JsonDocument^ sd = JsonX::ReadFile(startedFile);
+                if (sd != nullptr) {
+                    String^ agent = JsonX::GetStrOr(sd->RootElement, "agent", "");
+                    if (!String::IsNullOrEmpty(agent)) {
+                        extra->Append(",\"agent\":\"");
+                        extra->Append(JsonX::EscapeJson(agent));
+                        extra->Append("\"");
+                    }
+                }
+            }
+        } catch (Exception^) {}
+        EmitStreamEvent(p, taskId, "stream_started", extra, nullptr);
+    } else {
+        Console::WriteLine("  [stream] attached to " + taskId);
+        Console::WriteLine("  In-progress: " + dir);
     }
-    if (autoOpen) {
+
+    // Pre-emit the existing partials so the consumer sees the current
+    // state, not just changes from this point on.
+    int initialCount = 0;
+    try {
+        for each (String^ f in Directory::GetFiles(dir)) {
+            String^ name = Path::GetFileName(f);
+            if (name->StartsWith(".")) continue;
+            if (!name->Contains(".partial")) continue;
+            long long size = 0;
+            try { FileInfo^ fi = gcnew FileInfo(f); if (fi->Exists) size = (long long)fi->Length; } catch (Exception^) {}
+            if (asJson) {
+                StringBuilder^ extra = gcnew StringBuilder();
+                extra->Append("\"deliverable\":\"");
+                extra->Append(JsonX::EscapeJson(name));
+                extra->Append("\",\"path\":\"");
+                extra->Append(JsonX::EscapeJson(f));
+                extra->Append("\",\"bytes\":");
+                extra->Append(size);
+                extra->Append(",\"produced_at\":");
+                // best-effort mtime as Unix seconds; the watcher knows
+                // partial_ready was just emitted so this is for ordering.
+                try { FileInfo^ fi = gcnew FileInfo(f); extra->Append((Int64)(fi->LastWriteTimeUtc - DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind::Utc)).TotalSeconds); }
+                catch (Exception^) { extra->Append(0); }
+                EmitStreamEvent(p, taskId, "partial_ready", extra, nullptr);
+            } else {
+                Console::WriteLine("  [stream] ready: {0,-30}  {1,8} bytes", name, size);
+            }
+            initialCount++;
+        }
+    } catch (Exception^) {}
+
+    // Pre-emit the existing hints.
+    int lastHintCount = CountHintLines(dir);
+    if (asJson) {
+        try {
+            String^ hints = Path::Combine(dir, ".hints.jsonl");
+            if (File::Exists(hints)) {
+                array<String^>^ lines = File::ReadAllLines(hints);
+                for (int i = 0; i < lines->Length; i++) {
+                    try {
+                        JsonDocument^ hd = JsonDocument::Parse(lines[i]);
+                        if (hd == nullptr) continue;
+                        StringBuilder^ extra = gcnew StringBuilder();
+                        extra->Append("\"ts\":");
+                        extra->Append((int)JsonX::GetLong(hd->RootElement, "ts", 0));
+                        extra->Append(",\"index\":");
+                        extra->Append(i + 1);
+                        extra->Append(",\"text\":\"");
+                        extra->Append(JsonX::EscapeJson(JsonX::GetStrOr(hd->RootElement, "text", "")));
+                        extra->Append("\"");
+                        EmitStreamEvent(p, taskId, "hint_recorded", extra, nullptr);
+                    } catch (Exception^) {}
+                }
+            }
+        } catch (Exception^) {}
+    }
+
+    if (!asJson && autoOpen) {
         Console::WriteLine("  [stream] --auto-open: the skill shell would invoke the OS handler here");
     }
-    Console::WriteLine("");
-    Console::WriteLine("  Total: {0} partial file(s). Use the skill shell's Vortex.Streamer module for interactive streaming.", count);
+    if (!asJson) {
+        Console::WriteLine("");
+        Console::WriteLine("  Total: {0} partial file(s). Use the skill shell's Vortex.Streamer module for interactive streaming.", initialCount);
+    }
+
+    // --- v0.3.12 (Phase 2a): NDJSON poll loop ---
+    if (!asJson) {
+        // Text mode is unchanged from v0.2.2: print current state and exit.
+        // The skill shell's Vortex.Streamer module handles the live
+        // FileSystemWatcher loop on the operator-facing side.
+        return 0;
+    }
+
+    // NDJSON mode: poll the in_progress dir + audit.jsonl until
+    // .completed or .failed appears, or the dir disappears.
+    int lastPartialCount = initialCount;
+    bool running = true;
+    while (running) {
+        System::Threading::Thread::Sleep(250);
+        try {
+            // Terminal: .completed written by StreamSink::OnDispatchEnd
+            // before the partials are moved.
+            String^ completedFile = Path::Combine(dir, ".completed");
+            if (File::Exists(completedFile)) {
+                // Emit the terminal event and the deliverables list.
+                StringBuilder^ extra = gcnew StringBuilder();
+                extra->Append("\"status\":\"ok\"");
+                // Try to read the completed_at from the .completed manifest.
+                try {
+                    JsonDocument^ cd = JsonX::ReadFile(completedFile);
+                    if (cd != nullptr) {
+                        extra->Append(",\"completed_at\":");
+                        extra->Append((int)JsonX::GetLong(cd->RootElement, "completed_at", 0));
+                    }
+                } catch (Exception^) {}
+                // List the deliverables from the .completed manifest if present.
+                // StreamSink::OnDispatchEnd moves the partials to the
+                // project deliverables dir, but the in_progress dir still
+                // contains the .completed at this moment. We can also
+                // re-read the manifest to enumerate.
+                try {
+                    String^ projDir = p->ProjectDeliverablesDir;
+                    if (Directory::Exists(projDir)) {
+                        List<String^>^ delivs = gcnew List<String^>();
+                        for each (String^ df in Directory::GetFiles(projDir)) {
+                            String^ nm = Path::GetFileName(df);
+                            if (!nm->StartsWith(".")) delivs->Add(nm);
+                        }
+                        delivs->Sort();
+                        if (delivs->Count > 0) {
+                            extra->Append(",\"deliverables\":[");
+                            for (int i = 0; i < delivs->Count; i++) {
+                                if (i > 0) extra->Append(",");
+                                extra->Append("\"");
+                                extra->Append(JsonX::EscapeJson(delivs[i]));
+                                extra->Append("\"");
+                            }
+                            extra->Append("]");
+                            extra->Append(",\"moved_to\":\"");
+                            extra->Append(JsonX::EscapeJson(projDir));
+                            extra->Append("\"");
+                        }
+                    }
+                } catch (Exception^) {}
+                EmitStreamEvent(p, taskId, "stream_completed", extra, nullptr);
+                return 0;
+            }
+            // Terminal: .failed (if a future caller writes one)
+            String^ failedFile = Path::Combine(dir, ".failed");
+            if (File::Exists(failedFile)) {
+                StringBuilder^ extra = gcnew StringBuilder();
+                extra->Append("\"status\":\"failed\"");
+                EmitStreamEvent(p, taskId, "stream_failed", extra, nullptr);
+                return 1;
+            }
+            // Terminal: the in_progress dir disappeared (StreamSink::
+            // OnDispatchEnd cleans up after the move). This is a
+            // fallback terminal in case the .completed write was so
+            // fast we missed it. The .completed file should already
+            // have been moved to the deliverables dir by this point.
+            if (!Directory::Exists(dir)) {
+                EmitStreamEvent(p, taskId, "stream_completed", nullptr, nullptr);
+                return 0;
+            }
+
+            // New partials: count .partial* files and emit any new ones.
+            int curCount = 0;
+            for each (String^ f in Directory::GetFiles(dir)) {
+                String^ name = Path::GetFileName(f);
+                if (name->StartsWith(".")) continue;
+                if (!name->Contains(".partial")) continue;
+                curCount++;
+                if (curCount > lastPartialCount) {
+                    long long size = 0;
+                    try { FileInfo^ fi = gcnew FileInfo(f); if (fi->Exists) size = (long long)fi->Length; } catch (Exception^) {}
+                    long prodAt = 0;
+                    try { FileInfo^ fi = gcnew FileInfo(f); prodAt = (long)(fi->LastWriteTimeUtc - DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind::Utc)).TotalSeconds; } catch (Exception^) {}
+                    StringBuilder^ extra = gcnew StringBuilder();
+                    extra->Append("\"deliverable\":\"");
+                    extra->Append(JsonX::EscapeJson(name));
+                    extra->Append("\",\"path\":\"");
+                    extra->Append(JsonX::EscapeJson(f));
+                    extra->Append("\",\"bytes\":");
+                    extra->Append(size);
+                    extra->Append(",\"produced_at\":");
+                    extra->Append((Int64)prodAt);
+                    EmitStreamEvent(p, taskId, "partial_ready", extra, nullptr);
+                }
+            }
+            lastPartialCount = curCount;
+
+            // New hints: read .hints.jsonl and emit any new lines.
+            int curHintCount = CountHintLines(dir);
+            if (curHintCount > lastHintCount) {
+                try {
+                    String^ hints = Path::Combine(dir, ".hints.jsonl");
+                    array<String^>^ lines = File::ReadAllLines(hints);
+                    for (int i = lastHintCount; i < lines->Length; i++) {
+                        try {
+                            JsonDocument^ hd = JsonDocument::Parse(lines[i]);
+                            if (hd == nullptr) continue;
+                            StringBuilder^ extra = gcnew StringBuilder();
+                            extra->Append("\"ts\":");
+                            extra->Append((int)JsonX::GetLong(hd->RootElement, "ts", 0));
+                            extra->Append(",\"index\":");
+                            extra->Append(i + 1);
+                            extra->Append(",\"text\":\"");
+                            extra->Append(JsonX::EscapeJson(JsonX::GetStrOr(hd->RootElement, "text", "")));
+                            extra->Append("\"");
+                            EmitStreamEvent(p, taskId, "hint_recorded", extra, nullptr);
+                        } catch (Exception^) {}
+                    }
+                } catch (Exception^) {}
+                lastHintCount = curHintCount;
+            }
+
+            // New audit events: read audit.jsonl from the saved offset
+            // and emit any new lines that reference this task_id.
+            try {
+                if (File::Exists(auditPath)) {
+                    FileInfo^ fi = gcnew FileInfo(auditPath);
+                    long long curSize = fi->Length;
+                    if (curSize > auditStart) {
+                        FileStream^ fs = gcnew FileStream(auditPath, FileMode::Open, FileAccess::Read, FileShare::ReadWrite);
+                        fs->Seek(auditStart, SeekOrigin::Begin);
+                        // Read the new tail bytes (auditStart..curSize) and
+                        // decode as UTF-8. This sidesteps the StreamReader
+                        // constructor ambiguity on MSVC (the 2-arg and
+                        // 5-arg overloads with default params confuse it).
+                        long long bytesToRead = curSize - auditStart;
+                        array<unsigned char>^ buf = gcnew array<unsigned char>((int)bytesToRead);
+                        int bytesRead = fs->Read(buf, 0, (int)bytesToRead);
+                        fs->Close();
+                        auditStart = curSize;
+                        String^ tail = Text::Encoding::UTF8->GetString(buf, 0, bytesRead);
+                        // Parse each line, emit if task_id matches.
+                        array<String^>^ lines = tail->Split('\n');
+                        for each (String^ line in lines) {
+                            if (String::IsNullOrEmpty(line)) continue;
+                            try {
+                                JsonDocument^ ad = JsonDocument::Parse(line);
+                                if (ad == nullptr) continue;
+                                String^ tk = JsonX::GetStrOr(ad->RootElement, "task_id", "");
+                                if (tk != taskId) continue;
+                                StringBuilder^ extra = gcnew StringBuilder();
+                                extra->Append("\"ts\":");
+                                extra->Append((int)JsonX::GetLong(ad->RootElement, "ts", 0));
+                                extra->Append(",\"tier\":\"");
+                                extra->Append(JsonX::EscapeJson(JsonX::GetStrOr(ad->RootElement, "tier", "")));
+                                extra->Append("\",\"agent\":\"");
+                                extra->Append(JsonX::EscapeJson(JsonX::GetStrOr(ad->RootElement, "agent", "")));
+                                extra->Append("\",\"action\":\"");
+                                extra->Append(JsonX::EscapeJson(JsonX::GetStrOr(ad->RootElement, "action", "")));
+                                extra->Append("\",\"status\":\"");
+                                extra->Append(JsonX::EscapeJson(JsonX::GetStrOr(ad->RootElement, "status", "")));
+                                String^ sev = JsonX::GetStrOr(ad->RootElement, "severity", "");
+                                if (!String::IsNullOrEmpty(sev)) {
+                                    extra->Append("\",\"severity\":\"");
+                                    extra->Append(JsonX::EscapeJson(sev));
+                                }
+                                extra->Append("\"");
+                                EmitStreamEvent(p, taskId, "audit", extra, nullptr);
+                            } catch (Exception^) {}
+                        }
+                    }
+                }
+            } catch (Exception^) {}
+
+        } catch (Exception^ ex) {
+            EmitStreamEvent(p, taskId, "stream_failed", nullptr, ex->Message);
+            return 1;
+        }
+    }
     return 0;
 }
 
-// --stream-stop <task_id>: stop streaming (the dispatch continues in the
-// background). The engine side just confirms the in-progress dir exists.
-static int CmdStreamStop(Paths^ p, String^ taskId) {
+// --stream-stop <task_id> [--json]
+//
+// v0.3.12 (Phase 2a): --json emits a single-line confirmation per the
+// streaming contract. Text mode is unchanged.
+static int CmdStreamStop(Paths^ p, String^ taskId, bool asJson) {
     String^ dir = Path::Combine(p->InProgressDir, taskId);
     if (!Directory::Exists(dir)) {
-        ConsoleX::Err("No in-progress dispatch: " + taskId);
+        if (asJson) {
+            Console::WriteLine("{\"error\":\"No in-progress dispatch\",\"path\":\"" +
+                JsonX::EscapeJson(dir) + "\"}");
+        } else {
+            ConsoleX::Err("No in-progress dispatch: " + taskId);
+        }
         return 2;
     }
-    Console::WriteLine("  [stream] stopped watching " + taskId + " (dispatch continues in background)");
-    Console::WriteLine("  Use --stream-finalize to manually move .partial files to deliverables/");
+    long ts = (long)(DateTime::UtcNow - DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind::Utc)).TotalSeconds;
+    if (asJson) {
+        Console::WriteLine("{\"stopped\":true,\"task_id\":\"" +
+            JsonX::EscapeJson(taskId) + "\",\"stopped_at\":" + ts + "}");
+    } else {
+        Console::WriteLine("  [stream] stopped watching " + taskId + " (dispatch continues in background)");
+        Console::WriteLine("  Use --stream-finalize to manually move .partial files to deliverables/");
+    }
     return 0;
 }
 
-// --hint <task_id> --text <text>: append an operator hint to .hints.jsonl
-// so the next dispatch in the chain picks it up.
-static int CmdHint(Paths^ p, String^ taskId, String^ text) {
+// --hint <task_id> --text <text> [--json]
+//
+// v0.3.12 (Phase 2a): --json emits a single-line confirmation per the
+// streaming contract. Text mode is unchanged.
+static int CmdHint(Paths^ p, String^ taskId, String^ text, bool asJson) {
+    long ts = (long)(DateTime::UtcNow - DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind::Utc)).TotalSeconds;
+    // Read the current line count BEFORE appending so the new hint's
+    // index is (oldCount + 1).
+    String^ taskDir = Path::Combine(p->InProgressDir, taskId);
+    int preCount = CountHintLines(taskDir);
     bool ok = StreamSink::AppendHint(p, taskId, text);
     if (ok) {
-        ConsoleX::Ok("Hint sent to " + taskId + ": " + text);
+        if (asJson) {
+            Console::WriteLine("{\"hint_recorded\":true,\"task_id\":\"" +
+                JsonX::EscapeJson(taskId) + "\",\"index\":" + (preCount + 1) + ",\"ts\":" + ts + "}");
+        } else {
+            ConsoleX::Ok("Hint sent to " + taskId + ": " + text);
+        }
         Audit::Emit(p, "T2", "operator", "hint_sent", "ok",
             p->ProjectName, taskId, "LOW", "", "", "operator_hint",
             gcnew array<String^> { taskId }, 0);
         return 0;
     }
-    ConsoleX::Err("Failed to write hint. Is the in-progress dir for " + taskId + " present?");
+    if (asJson) {
+        Console::WriteLine("{\"error\":\"Failed to write hint. Is the in-progress dir for " + taskId + " present?\"}");
+    } else {
+        ConsoleX::Err("Failed to write hint. Is the in-progress dir for " + taskId + " present?");
+    }
     return 1;
 }
 
-// --stream-finalize <task_id>: manually move .partial files to
-// deliverables/<project>/. Used when a dispatch was aborted but the
-// operator still wants the partial deliverables.
-static int CmdStreamFinalize(Paths^ p, String^ taskId) {
+// --stream-finalize <task_id> [--json]
+//
+// v0.3.12 (Phase 2a): --json emits a single-line summary per the
+// streaming contract. Text mode is unchanged.
+static int CmdStreamFinalize(Paths^ p, String^ taskId, bool asJson) {
+    // Snapshot the deliverables dir BEFORE StreamSink::OnDispatchEnd
+    // moves the partials into it, so we can report what was there
+    // (the leftovers from a previous dispatch) vs what got moved.
+    String^ projDir = p->ProjectDeliverablesDir;
+    int preCount = 0;
+    try {
+        if (Directory::Exists(projDir)) {
+            for each (String^ f in Directory::GetFiles(projDir)) {
+                if (!Path::GetFileName(f)->StartsWith(".")) preCount++;
+            }
+        }
+    } catch (Exception^) {}
     StreamSink::OnDispatchEnd(p, taskId, p->ProjectName, "ok");
-    ConsoleX::Ok("Stream finalized: " + taskId);
+    // After the move, count the deliverables again.
+    List<String^>^ delivs = gcnew List<String^>();
+    try {
+        if (Directory::Exists(projDir)) {
+            for each (String^ f in Directory::GetFiles(projDir)) {
+                String^ nm = Path::GetFileName(f);
+                if (!nm->StartsWith(".")) delivs->Add(nm);
+            }
+            delivs->Sort();
+        }
+    } catch (Exception^) {}
+    if (asJson) {
+        StringBuilder^ sb = gcnew StringBuilder();
+        sb->Append("{\"finalized\":true,\"task_id\":\"");
+        sb->Append(JsonX::EscapeJson(taskId));
+        sb->Append("\",\"status\":\"ok\"");
+        if (delivs->Count > 0) {
+            sb->Append(",\"deliverables\":[");
+            for (int i = 0; i < delivs->Count; i++) {
+                if (i > 0) sb->Append(",");
+                sb->Append("\"");
+                sb->Append(JsonX::EscapeJson(delivs[i]));
+                sb->Append("\"");
+            }
+            sb->Append("]");
+            sb->Append(",\"moved_to\":\"");
+            sb->Append(JsonX::EscapeJson(projDir));
+            sb->Append("\"");
+        } else {
+            sb->Append(",\"deliverables\":[]");
+        }
+        sb->Append("}");
+        Console::WriteLine(sb->ToString());
+    } else {
+        ConsoleX::Ok("Stream finalized: " + taskId);
+    }
     return 0;
 }
 
@@ -1695,13 +2099,13 @@ static int CmdHelp() {
     Console::WriteLine("  skill.exe --version             Print version and exit");
     Console::WriteLine();
     Console::WriteLine("GLOBAL FLAGS:");
-    Console::WriteLine("  --json                         Emit a single-line JSON object instead of human-");
-    Console::WriteLine("                                readable text. Supported by 23 of the 35 verbs");
-    Console::WriteLine("                                listed below. See docs/cli-json-contract.md for");
-    Console::WriteLine("                                the per-verb shape. Errors come out as");
-    Console::WriteLine("                                {\"error\":\"...\"} on the same stdout stream.");
-    Console::WriteLine("                                Streaming verbs (--stream, --hint, ...) do not");
-    Console::WriteLine("                                support --json; they emit a stream of events");
+    Console::WriteLine("  --json                         Emit a JSON object instead of human-readable");
+    Console::WriteLine("                                text. Supported by 27 of the 35 verbs (see");
+    Console::WriteLine("                                docs/cli-json-contract.md and");
+    Console::WriteLine("                                docs/cli-streaming-contract.md for the per-verb");
+    Console::WriteLine("                                shape). The 4 streaming verbs");
+    Console::WriteLine("                                (--stream, --stream-stop, --stream-finalize,");
+    Console::WriteLine("                                --hint) emit NDJSON: one event per line.");
     Console::WriteLine();
     Console::WriteLine("DISCOVERY & INSPECTION:");
     Console::WriteLine("  --agents-discover              List all available agents");
@@ -2315,33 +2719,45 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         return CmdStreamList(p, asJson);
     }
     if (cmd == "--stream") {
-        // --stream <task_id> [--auto-open]
-        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --stream <task_id> [--auto-open]"); return 2; }
-        bool autoOpen = false;
+        // --stream <task_id> [--auto-open] [--json]
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --stream <task_id> [--auto-open] [--json]"); return 2; }
+        bool autoOpen = false, asJson = false;
         for (int i = 2; i < args->Length; i++) {
             if (args[i] == "--auto-open") { autoOpen = true; }
+            else if (args[i] == "--json")    { asJson = true; }
         }
-        return CmdStream(p, args[1], autoOpen);
+        return CmdStream(p, args[1], autoOpen, asJson);
     }
     if (cmd == "--stream-stop") {
-        // --stream-stop <task_id>
-        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --stream-stop <task_id>"); return 2; }
-        return CmdStreamStop(p, args[1]);
+        // --stream-stop <task_id> [--json]
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --stream-stop <task_id> [--json]"); return 2; }
+        bool asJson = false;
+        for (int i = 2; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; }
+        }
+        return CmdStreamStop(p, args[1], asJson);
     }
     if (cmd == "--hint") {
-        // --hint <task_id> --text <text>
-        if (args->Length < 4) { ConsoleX::Err("Usage: skill.exe --hint <task_id> --text <text>"); return 2; }
+        // --hint <task_id> --text <text> [--json]
+        if (args->Length < 4) { ConsoleX::Err("Usage: skill.exe --hint <task_id> --text <text> [--json]"); return 2; }
         String^ hintText = "";
+        bool asJson = false;
         for (int i = 2; i < args->Length; i++) {
             if (args[i] == "--text" && i + 1 < args->Length) { hintText = args[++i]; }
+            else if (args[i] == "--json") { asJson = true; }
         }
         if (String::IsNullOrEmpty(hintText)) { ConsoleX::Err("--hint requires --text"); return 2; }
-        return CmdHint(p, args[1], hintText);
+        return CmdHint(p, args[1], hintText, asJson);
     }
     if (cmd == "--stream-finalize") {
         // Test helper: simulate a dispatch end (moves .partial -> deliverables).
-        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --stream-finalize <task_id>"); return 2; }
-        return CmdStreamFinalize(p, args[1]);
+        // --stream-finalize <task_id> [--json]
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --stream-finalize <task_id> [--json]"); return 2; }
+        bool asJson = false;
+        for (int i = 2; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; }
+        }
+        return CmdStreamFinalize(p, args[1], asJson);
     }
 
     // Help -------------------------------------------------------------------

@@ -1904,6 +1904,224 @@ Write-Output '===END==='
     }
 
     # -----------------------------------------------------------------------
+    # G58-G65: Phase 2a of the cross-OS contract (v0.3.12). The 4 streaming
+    # verbs (`--stream`, `--stream-stop`, `--stream-finalize`, `--hint`) are
+    # documented in docs/cli-streaming-contract.md. The contract shape is:
+    #   * `--stream` emits NDJSON: one event object per line, no envelope.
+    #     Event types: stream_started, partial_ready, hint_recorded, audit,
+    #     progress, stream_completed, stream_failed. Exactly one terminal
+    #     event per stream.
+    #   * The other 3 verbs follow the Phase 1 single-line shape: errors as
+    #     {"error":"...","path":"..."} on the same stdout stream, success as
+    #     a single object with the documented field names.
+    # The v0.3.11.2 short-circuit fix in skill.ps1 ensures `--json` is not
+    # stripped before reaching the engine for these verbs.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "=== G58-G65: Streaming NDJSON contract (v0.3.12) ===" -ForegroundColor Cyan
+
+    # Helper: extract ALL valid JSON lines from output that may be
+    # contaminated by skill.ps1's auto-update banner. Returns the lines
+    # in order, trimmed. Skips blank lines. Used for the NDJSON
+    # `--stream` path; the single-line verbs use Get-VortexJsonLine.
+    function Get-VortexJsonLines {
+        param([string[]] $Lines)
+        $jsonLines = @()
+        foreach ($l in $Lines) {
+            $t = $l.Trim()
+            if ($t -match '^\{.*\}$') { $jsonLines += $t }
+        }
+        return $jsonLines
+    }
+
+    # Shared setup: seed a fake in_progress dir for the streaming tests.
+    # The engine looks in $VORTEX_HOME/state/in_progress/<task_id>/.
+    $g58TaskId = 'g58_task_' + (Get-Random)
+    $g58StateDir = Join-Path $scratchHome 'state'
+    $g58InProgDir = Join-Path $g58StateDir 'in_progress'
+    if (-not (Test-Path $g58InProgDir)) {
+        New-Item -ItemType Directory -Path $g58InProgDir -Force | Out-Null
+    }
+    $g58TaskDir = Join-Path $g58InProgDir $g58TaskId
+    if (-not (Test-Path $g58TaskDir)) {
+        New-Item -ItemType Directory -Path $g58TaskDir -Force | Out-Null
+    }
+    '{"started_at":1700000000,"agent":"supervisor.shift","task_id":"' + $g58TaskId + '","project":"smoke"}' |
+        Set-Content -LiteralPath (Join-Path $g58TaskDir '.started') -Encoding utf8
+    "script content here" | Set-Content -LiteralPath (Join-Path $g58TaskDir 'script.partial') -Encoding utf8
+    "soundscape content" | Set-Content -LiteralPath (Join-Path $g58TaskDir 'soundscape.partial') -Encoding utf8
+    # Seed a pre-existing hint in .hints.jsonl so the hint_recorded pre-emit
+    # has something to emit.
+    '{"ts":1700000010,"text":"prior hint"}' |
+        Set-Content -LiteralPath (Join-Path $g58TaskDir '.hints.jsonl') -Encoding utf8
+
+    # G58: --stream-stop --json single-line shape on success.
+    #   {stopped:true, task_id:..., stopped_at:<int>}
+    $g58StopOut = & pwsh -NoProfile -File $skillPath --stream-stop $g58TaskId --json 2>&1 |
+        Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g58StopOut = $g58StopOut.Trim()
+    $g58StopJson = $null
+    try { $g58StopJson = $g58StopOut | ConvertFrom-Json } catch {}
+    Check "G58a: --stream-stop --json parses as JSON" { $g58StopJson -ne $null }
+    Check "G58b: --stream-stop --json is a single line" {
+        -not ($g58StopOut.Contains([char]10) -or $g58StopOut.Contains([char]13))
+    }
+    Check "G58c: --stream-stop --json has stopped=true" { $g58StopJson.stopped -eq $true }
+    Check "G58d: --stream-stop --json has task_id round-trip" {
+        $g58StopJson.PSObject.Properties['task_id'] -and $g58StopJson.task_id -eq $g58TaskId
+    }
+    Check "G58e: --stream-stop --json has stopped_at (int)" {
+        $g58StopJson.PSObject.Properties['stopped_at'] -and $g58StopJson.stopped_at -is [int64]
+    }
+
+    # G59: --stream-stop --json error shape on missing in-progress dir.
+    #   {error:"...", path:"..."} on stdout.
+    $g59Out = & pwsh -NoProfile -File $skillPath --stream-stop g59_no_such_task --json 2>&1 |
+        Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g59Out = $g59Out.Trim()
+    $g59Json = $null
+    try { $g59Json = $g59Out | ConvertFrom-Json } catch {}
+    Check "G59a: --stream-stop --json error path parses as JSON" { $g59Json -ne $null }
+    Check "G59b: --stream-stop --json error path has error key" {
+        $g59Json.PSObject.Properties['error']
+    }
+    Check "G59c: --stream-stop --json error path has path key" {
+        $g59Json.PSObject.Properties['path']
+    }
+
+    # G60: --stream-finalize --json single-line shape.
+    #   {finalized:true, task_id:..., status:"ok", deliverables:[...]}
+    $g60FinOut = & pwsh -NoProfile -File $skillPath --stream-finalize $g58TaskId --json 2>&1 |
+        Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g60FinOut = $g60FinOut.Trim()
+    $g60FinJson = $null
+    try { $g60FinJson = $g60FinOut | ConvertFrom-Json } catch {}
+    Check "G60a: --stream-finalize --json parses as JSON" { $g60FinJson -ne $null }
+    Check "G60b: --stream-finalize --json is a single line" {
+        -not ($g60FinOut.Contains([char]10) -or $g60FinOut.Contains([char]13))
+    }
+    Check "G60c: --stream-finalize --json has finalized=true" { $g60FinJson.finalized -eq $true }
+    Check "G60d: --stream-finalize --json has task_id round-trip" {
+        $g60FinJson.PSObject.Properties['task_id'] -and $g60FinJson.task_id -eq $g58TaskId
+    }
+    Check "G60e: --stream-finalize --json has status=ok" {
+        $g60FinJson.PSObject.Properties['status'] -and $g60FinJson.status -eq 'ok'
+    }
+    Check "G60f: --stream-finalize --json has deliverables array (may be empty)" {
+        $g60FinJson.PSObject.Properties['deliverables'] -and $g60FinJson.deliverables -is [array]
+    }
+
+    # G61: --hint --json single-line shape.
+    #   {hint_recorded:true, task_id:..., index:<int>, ts:<int>}
+    # Re-seed an in_progress dir because G60's --stream-finalize may have
+    # removed it via StreamSink::OnDispatchEnd.
+    if (-not (Test-Path $g58TaskDir)) {
+        New-Item -ItemType Directory -Path $g58TaskDir -Force | Out-Null
+    }
+    $g61Out = & pwsh -NoProfile -File $skillPath --hint $g58TaskId --text 'g61 test hint' --json 2>&1 |
+        Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g61Out = $g61Out.Trim()
+    $g61Json = $null
+    try { $g61Json = $g61Out | ConvertFrom-Json } catch {}
+    Check "G61a: --hint --json parses as JSON" { $g61Json -ne $null }
+    Check "G61b: --hint --json is a single line" {
+        -not ($g61Out.Contains([char]10) -or $g61Out.Contains([char]13))
+    }
+    Check "G61c: --hint --json has hint_recorded=true" { $g61Json.hint_recorded -eq $true }
+    Check "G61d: --hint --json has task_id round-trip" {
+        $g61Json.PSObject.Properties['task_id'] -and $g61Json.task_id -eq $g58TaskId
+    }
+    Check "G61e: --hint --json has index (int64)" {
+        $g61Json.PSObject.Properties['index'] -and $g61Json.index -is [int64]
+    }
+    Check "G61f: --hint --json has ts (int)" {
+        $g61Json.PSObject.Properties['ts'] -and $g61Json.ts -is [int64]
+    }
+
+    # G62: --stream --json is NDJSON (one event per line, no envelope).
+    # Re-seed the in_progress dir and use a background process + timer to
+    # drop .completed so the watcher terminates within the test budget.
+    if (-not (Test-Path $g58TaskDir)) {
+        New-Item -ItemType Directory -Path $g58TaskDir -Force | Out-Null
+    }
+    '{"started_at":1700000000,"agent":"supervisor.shift","task_id":"' + $g58TaskId + '","project":"smoke"}' |
+        Set-Content -LiteralPath (Join-Path $g58TaskDir '.started') -Encoding utf8
+    "script content" | Set-Content -LiteralPath (Join-Path $g58TaskDir 'script.partial') -Encoding utf8
+    $g62Stdout = Join-Path $scratchHome 'g62_stdout.txt'
+    $g62Stderr = Join-Path $scratchHome 'g62_stderr.txt'
+    $g62Proc = Start-Process pwsh -ArgumentList @(
+        '-NoProfile', '-File', $skillPath, '--stream', $g58TaskId, '--json'
+    ) -PassThru -NoNewWindow -RedirectStandardOutput $g62Stdout -RedirectStandardError $g62Stderr
+    # Give the watcher 1500ms to emit the initial state.
+    Start-Sleep -Milliseconds 1500
+    # Drop .completed to terminate the stream.
+    '{"completed_at":1700000050,"status":"ok"}' |
+        Set-Content -LiteralPath (Join-Path $g58TaskDir '.completed') -Encoding utf8
+    $g62Proc.WaitForExit(5000) | Out-Null
+    $g62Raw = Get-Content $g62Stdout -ErrorAction SilentlyContinue
+    $g62JsonLines = Get-VortexJsonLines $g62Raw
+    # Parse each line; collect successful parses.
+    $g62Events = @()
+    foreach ($jl in $g62JsonLines) {
+        try { $g62Events += ($jl | ConvertFrom-Json) } catch {}
+    }
+    Check "G62a: --stream --json emits at least 1 event" { $g62Events.Count -ge 1 }
+    Check "G62b: --stream --json first event is stream_started" {
+        $g62Events.Count -ge 1 -and $g62Events[0].event -eq 'stream_started'
+    }
+    Check "G62c: --stream --json has a partial_ready event" {
+        $g62Events | Where-Object { $_.event -eq 'partial_ready' } | Select-Object -First 1
+    }
+    Check "G62d: --stream --json has a stream_completed terminal" {
+        $g62Events | Where-Object { $_.event -eq 'stream_completed' } | Select-Object -First 1
+    }
+    Check "G62e: --stream --json exit code is 0" { $g62Proc.ExitCode -eq 0 }
+
+    # G63: stream_started event has task_id, started_at, agent fields.
+    $g63Started = $g62Events | Where-Object { $_.event -eq 'stream_started' } | Select-Object -First 1
+    Check "G63a: stream_started has task_id round-trip" {
+        $g63Started -and $g63Started.PSObject.Properties['task_id'] -and $g63Started.task_id -eq $g58TaskId
+    }
+    Check "G63b: stream_started has started_at (int)" {
+        $g63Started -and $g63Started.PSObject.Properties['started_at'] -and $g63Started.started_at -is [int64]
+    }
+    Check "G63c: stream_started has agent field" {
+        $g63Started -and $g63Started.PSObject.Properties['agent'] -and $g63Started.agent -eq 'supervisor.shift'
+    }
+
+    # G64: partial_ready event has deliverable, path, bytes, produced_at.
+    $g64Partial = $g62Events | Where-Object { $_.event -eq 'partial_ready' } | Select-Object -First 1
+    Check "G64a: partial_ready has deliverable field" {
+        $g64Partial -and $g64Partial.PSObject.Properties['deliverable']
+    }
+    Check "G64b: partial_ready has path field" {
+        $g64Partial -and $g64Partial.PSObject.Properties['path']
+    }
+    Check "G64c: partial_ready has bytes (int)" {
+        $g64Partial -and $g64Partial.PSObject.Properties['bytes'] -and $g64Partial.bytes -is [int64]
+    }
+    Check "G64d: partial_ready has produced_at (int)" {
+        $g64Partial -and $g64Partial.PSObject.Properties['produced_at'] -and $g64Partial.produced_at -is [int64]
+    }
+
+    # G65: --stream --json with no in-progress dir returns {error, path}.
+    $g65Out = & pwsh -NoProfile -File $skillPath --stream g65_no_such_task --json 2>&1 |
+        Where-Object { $_.Trim() -match '^\{.*\}$|^\[.*\]$' } | Out-String
+    $g65Out = $g65Out.Trim()
+    $g65Json = $null
+    try { $g65Json = $g65Out | ConvertFrom-Json } catch {}
+    Check "G65a: --stream --json no in-progress parses as JSON" { $g65Json -ne $null }
+    Check "G65b: --stream --json no in-progress has error key" {
+        $g65Json.PSObject.Properties['error']
+    }
+    Check "G65c: --stream --json no in-progress has path key" {
+        $g65Json.PSObject.Properties['path']
+    }
+    Check "G65d: --stream --json no in-progress is a single line (not NDJSON for errors)" {
+        -not ($g65Out.Contains([char]10) -or $g65Out.Contains([char]13))
+    }
+
+    # -----------------------------------------------------------------------
     # Summary
     # -----------------------------------------------------------------------
     Write-Host ""

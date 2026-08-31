@@ -179,8 +179,14 @@ parse a verb's JSON. The contract is the JSON itself.
   `--*-status`) should always support `--json`. These are the verbs
   consumed by the PowerShell shim, by CI scripts, and by future
   cross-OS shims.
-- **Streaming verbs** (`--stream`, `--hint`) emit a stream of events,
-  not a single response. The contract for streaming is a separate
-  file (`docs/cli-streaming-contract.md`, planned 0.3.11). For now,
-  these verbs do not support `--json` — `--hint` writes to a JSONL
-  file that the consumer reads separately.
+- **Streaming verbs** (`--stream`, `--stream-stop`, `--stream-finalize`, `--hint`)
+  emit a stream of events, not a single response. The contract for
+  streaming is a separate file:
+  **[`docs/cli-streaming-contract.md`](cli-streaming-contract.md)** (v0.3.12+).
+  That contract inherits the snake_case + invariant-culture + error-shape
+  rules from this document but uses **NDJSON** (one JSON object per
+  line) for `--stream` rather than a single line, because the
+  stream doesn't end until the dispatch finishes. `--stream-stop`,
+  `--stream-finalize`, and `--hint` use a single-line response (the
+  same shape as this contract's action verbs). The 4 streaming verbs
+  did not support `--json` before v0.3.12; v0.3.12+ honors it.
