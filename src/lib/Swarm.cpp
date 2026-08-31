@@ -14,7 +14,17 @@ namespace Vortex {
         String^ swarmDir = Path::Combine(p->SwarmsDir, "active_" + swarmId);
         Directory::CreateDirectory(Path::Combine(swarmDir, "agents"));
         Directory::CreateDirectory(Path::Combine(swarmDir, "memory"));
-        Directory::CreateDirectory(Path::Combine(swarmDir, "deliverables"));
+        // v0.3.16: removed the "deliverables" subdirectory. It was a
+        // v0.3.0-v0.3.7 staging artifact (the original bash design had
+        // the executor write there, and the packager copied from there
+        // to <project>/deliverables/). The C++ port changed the executor
+        // to write directly to <project>/deliverables/ but never
+        // updated the packager, so the staging dir was always empty
+        // after a real dispatch. v0.3.15 worked around this with a
+        // dual-source merge in Packager::Package; v0.3.16 makes the
+        // packager single-source (= <project>/deliverables/>) and
+        // deletes the dead staging dir. See PR #7 for the design
+        // discussion.
         Directory::CreateDirectory(Path::Combine(swarmDir, "state"));
 
         // Delegate planning to the Shift Supervisor layer.

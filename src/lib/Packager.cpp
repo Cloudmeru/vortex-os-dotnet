@@ -46,21 +46,32 @@ namespace Vortex {
             ConsoleX::Err("Swarm directory not found: " + swarmDir);
             return ExitCodes::BadInput;
         }
-        // v0.3.15: previously the packager bailed if <swarmDir>/deliverables/
-        // did not exist. After a real --dispatch-template, the executor
-        // (CmdDispatchAgentRoster) writes directly to p->ProjectDeliverablesDir
-        // -- NOT to <swarmDir>/deliverables/ -- so this branch used to
-        // short-circuit with "Swarm has no deliverables/ subdirectory" on
-        // every real dispatch. The fix is to make <swarmDir>/deliverables/
-        // optional: if it exists, enumerate it; if not, fall through to
-        // enumerate p->ProjectDeliverablesDir (the executor's output)
-        // instead. G29h is the regression test.
-        String^ srcDir = Path::Combine(swarmDir, "deliverables");
-        bool swarmDelivsExists = Directory::Exists(srcDir);
+        // v0.3.16: SINGLE source of truth. The packager enumerates
+        // <project>/deliverables/ (= the destination) and writes the
+        // manifest. No copy, no "refuse to overwrite" -- the files
+        // are already at the destination (the executor put them there).
+        //
+        // History (the why):
+        //   v0.3.0-v0.3.7 (bash):  executor wrote to <swarmDir>/deliverables/,
+        //                         packager copied from there to <project>/.
+        //   v0.3.7 (C++ port):     executor changed to write directly to
+        //                         <project>/deliverables/ (skipping the
+        //                         staging dir), but the packager was not
+        //                         updated. The staging dir was still created
+        //                         by Swarm::Spawn, but nothing wrote to it.
+        //   v0.3.15:              dual-source merge in the packager
+        //                         (workaround for the broken single-source).
+        //   v0.3.16 (this):       single-source = <project>/deliverables/>.
+        //                         Swarm::Spawn no longer creates the dead
+        //                         staging dir. Every file is enumerated and
+        //                         added to the manifest with status
+        //                         ALREADY_PRESENT. No more dual-source logic,
+        //                         no more "refuse to overwrite" branches.
         String^ projectName = String::IsNullOrEmpty(p->ProjectName) ? "_unfiled" : p->ProjectName;
         String^ dstDir = String::IsNullOrEmpty(p->ProjectName)
             ? p->DeliverablesDir
             : p->ProjectDeliverablesDir;
+        String^ srcDir = dstDir;  // single source = destination
         Directory::CreateDirectory(dstDir);
 
         // v0.2.3 (G1): the audit log is the operator's source of truth for
@@ -77,85 +88,42 @@ namespace Vortex {
             gcnew array<String^> { swarmId, projectName, dryRun ? "dry-run" : "real" }, 0);
 
         ConsoleX::Banner("VORTEX-OS - Packaging Swarm " + swarmId);
-        Console::WriteLine("  Source:      " + (swarmDelivsExists ? srcDir : dstDir) + (swarmDelivsExists ? "" : "  (executor's output)"));
-        Console::WriteLine("  Destination: " + dstDir);
+        Console::WriteLine("  Source:      " + srcDir);
+        Console::WriteLine("  Destination: " + dstDir + "  (same as source)");
         Console::WriteLine("  Project:     " + projectName + (dryRun ? "  (DRY RUN)" : ""));
         Console::WriteLine();
 
-        // v0.3.15: build the source list. Priority:
-        //   1. <swarmDir>/deliverables/  (legacy: pre-v0.3.15 source)
-        //   2. <project>/deliverables/  (where the executor actually writes)
-        //   3. <VORTEX_HOME>/deliverables/  (unfiled, when no project)
-        // Files are merged + deduped by filename. Skip our own .manifest.json.
-        List<String^>^ allSources = gcnew List<String^>();
-        if (swarmDelivsExists) {
+        // Enumerate the source (= destination). Skip our own .manifest.json.
+        List<String^>^ realFiles = gcnew List<String^>();
+        if (Directory::Exists(srcDir)) {
             for each (String^ f in Directory::GetFiles(srcDir)) {
-                allSources->Add(f);
-            }
-        }
-        if (Directory::Exists(dstDir)) {
-            for each (String^ f in Directory::GetFiles(dstDir)) {
-                String^ name = Path::GetFileName(f);
-                if (name == ".manifest.json") continue;  // skip our own output
-                bool found = false;
-                for each (String^ existing in allSources) {
-                    if (Path::GetFileName(existing) == name) { found = true; break; }
+                if (Path::GetFileName(f) != ".manifest.json") {
+                    realFiles->Add(f);
                 }
-                if (!found) allSources->Add(f);
             }
         }
-        if (allSources->Count == 0) {
-            ConsoleX::Warn("No source files in either " + srcDir + " or " + dstDir + " -- writing an empty manifest");
+        if (realFiles->Count == 0) {
+            ConsoleX::Warn("No source files in " + srcDir + " -- writing an empty manifest");
         }
 
         // Plan the copy + collect metadata.
+        // v0.3.16: source == destination (single-source design). Every
+        // file is "ALREADY_PRESENT" -- no copy needed. The old
+        // COPIED / SKIPPED_EXISTS / FAILED branches are dead code in
+        // the new design (kept here as comments for context).
         List<String^>^ manifest = gcnew List<String^>();
         int copied = 0, skipped = 0, failed = 0;
-        array<String^>^ files = allSources->ToArray();
+        array<String^>^ files = realFiles->ToArray();
         for each (String ^ src in files) {
             String^ name = Path::GetFileName(src);
-            String^ dst  = Path::Combine(dstDir, name);
             FileInfo^ srcInfo = gcnew FileInfo(src);
             long len = srcInfo->Length;
             String^ sum  = ShortChecksum(src);
 
-            // v0.3.15: the source may be the destination itself (when
-            // the executor already wrote the file to p->ProjectDeliverablesDir).
-            // In that case there's nothing to copy -- just enumerate.
-            // Mark as "ALREADY_PRESENT" so the manifest's summary.copied
-            // correctly counts the executor's deliverables.
-            if (String::Compare(Path::GetFullPath(src), Path::GetFullPath(dst), StringComparison::OrdinalIgnoreCase) == 0) {
-                ConsoleX::Ok("Already present: " + name + "  (" + len + " bytes, " + sum + ")");
-                manifest->Add(String::Format(
-                    "{{ \"file\": \"{0}\", \"status\": \"ALREADY_PRESENT\", \"bytes\": {1}, \"checksum\": \"{2}\" }}",
-                    JsonX::EscapeJson(name), len, sum));
-                copied++;  // counts as "delivered" for accounting
-                continue;
-            }
-            if (File::Exists(dst)) {
-                ConsoleX::Fail("EXISTS, refusing to overwrite: " + name);
-                manifest->Add(String::Format(
-                    "{{ \"file\": \"{0}\", \"status\": \"SKIPPED_EXISTS\", \"bytes\": {1}, \"checksum\": \"{2}\" }}",
-                    JsonX::EscapeJson(name), len, sum));
-                skipped++;
-                continue;
-            }
             if (dryRun) {
-                ConsoleX::Step("[dry-run] would copy: " + name + "  (" + len + " bytes, " + sum + ")");
-                manifest->Add(String::Format(
-                    "{{ \"file\": \"{0}\", \"status\": \"DRY_RUN\", \"bytes\": {1}, \"checksum\": \"{2}\" }}",
-                    JsonX::EscapeJson(name), len, sum));
-                copied++;
-                continue;
-            }
-            try {
-                File::Copy(src, dst, false);
-                ConsoleX::Ok("Copied: " + name + "  (" + len + " bytes, " + sum + ")");
-                manifest->Add(String::Format(
-                    "{{ \"file\": \"{0}\", \"status\": \"COPIED\", \"bytes\": {1}, \"checksum\": \"{2}\", "
-                    "\"copied_at\": \"{3}\" }}",
-                    JsonX::EscapeJson(name), len, sum,
-                    DateTime::Now.ToString("yyyy-MM-ddTHH:mm:ss", System::Globalization::CultureInfo::InvariantCulture)));
+                ConsoleX::Step("[dry-run] already present: " + name + "  (" + len + " bytes, " + sum + ")");
+            } else {
+                ConsoleX::Ok("Packaged: " + name + "  (" + len + " bytes, " + sum + ")");
                 // v0.2.3 (G1): one audit line per delivered file so the
                 // audit viewer can show each "deliver" action with the
                 // file name as a tag. Same shape as the T4 worker in
@@ -163,15 +131,21 @@ namespace Vortex {
                 Audit::Emit(p, "T3", agentName, "deliver", "ok",
                     projectName, taskId, "LOW", "", "", name,
                     gcnew array<String^> { "packager", name, sum }, len);
-                copied++;
-            } catch (Exception^ ex) {
-                ConsoleX::Fail("Copy failed: " + name + "  (" + ex->Message + ")");
-                manifest->Add(String::Format(
-                    "{{ \"file\": \"{0}\", \"status\": \"FAILED\", \"error\": \"{1}\" }}",
-                    JsonX::EscapeJson(name), JsonX::EscapeJson(ex->Message)));
-                failed++;
             }
+            manifest->Add(String::Format(
+                "{{ \"file\": \"{0}\", \"status\": \"ALREADY_PRESENT\", \"bytes\": {1}, \"checksum\": \"{2}\" }}",
+                JsonX::EscapeJson(name), len, sum));
+            copied++;
         }
+        // Dead-code branches (v0.3.16 single-source design):
+        //   - File::Copy(src, dst): src == dst, would throw IOException
+        //   - File::Exists(dst): src IS dst, would always be true
+        //   - dryRun "would copy" status: no copy happens
+        //   - SKIPPED_EXISTS: no copy is attempted
+        //   - FAILED: no copy is attempted
+        // These branches existed in the pre-v0.3.7 design where the
+        // packager copied from a staging dir to the project dir. v0.3.16
+        // eliminates that flow.
 
         // Write .manifest.json (skip in dry-run).
         if (!dryRun) {

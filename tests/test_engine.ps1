@@ -110,29 +110,38 @@ try {
     # -----------------------------------------------------------------------
     Write-Host ""
     Write-Host "[4] Packager dry-run + real run"
-    # Build a synthetic swarm deliverables/ dir.
+    # v0.3.16: the packager is now single-source. Files go directly in
+    # <project>/deliverables/ (where the executor writes) -- the old
+    # <swarmDir>/deliverables/ staging dir is gone. The packager
+    # enumerates files, finds them already at the destination, and
+    # marks them as ALREADY_PRESENT in the manifest.
     $swarmId = 'test_swarm_packaging'
-    $delivDir = Join-Path $scratchHome "swarms\active_$swarmId\deliverables"
-    [IO.Directory]::CreateDirectory($delivDir) | Out-Null
-    'Episode 1 script body'           | Set-Content (Join-Path $delivDir 'script.md') -Encoding UTF8
-    '{"protagonist":"Eira"}'           | Set-Content (Join-Path $delivDir 'character_bible_delta.json') -Encoding UTF8
-    'fake-wav-bytes'                   | Set-Content (Join-Path $delivDir 'ambient.wav') -Encoding UTF8 -NoNewline
+    $swarmDir4 = Join-Path $swarmsDir "active_$swarmId"
+    if (-not (Test-Path $swarmDir4)) {
+        New-Item -ItemType Directory -Path $swarmDir4 -Force | Out-Null
+    }
+    $env:VORTEX_PROJECT = 'pkg_test'
+    $projDelivsDir = Join-Path $scratchHome 'deliverables\pkg_test'
+    if (-not (Test-Path $projDelivsDir)) {
+        New-Item -ItemType Directory -Path $projDelivsDir -Force | Out-Null
+    }
+    'Episode 1 script body'           | Set-Content (Join-Path $projDelivsDir 'script.md') -Encoding UTF8
+    '{"protagonist":"Eira"}'           | Set-Content (Join-Path $projDelivsDir 'character_bible_delta.json') -Encoding UTF8
+    'fake-wav-bytes'                   | Set-Content (Join-Path $projDelivsDir 'ambient.wav') -Encoding UTF8 -NoNewline
 
     # Dry run
-    $env:VORTEX_PROJECT = 'pkg_test'
     $dryOut = (& pwsh -NoProfile -File $skillPath --package $swarmId --dry-run 2>&1 | Out-String)
     Check "packager --dry-run prints DRY RUN" { $dryOut -match 'DRY RUN' }
-    Check "packager --dry-run lists script.md" { $dryOut -match 'would copy: script.md' }
+    Check "packager --dry-run lists script.md" { $dryOut -match 'already present: script.md' }
     $dryDest = Join-Path $scratchHome 'deliverables\pkg_test'
-    Check "no files copied on dry run" { -not (Test-Path (Join-Path $dryDest 'script.md')) }
+    Check "no manifest written on dry run" { -not (Test-Path (Join-Path $dryDest '.manifest.json')) }
 
     # Real run
-    $env:VORTEX_PROJECT = 'pkg_test'
     $realOut = (& pwsh -NoProfile -File $skillPath --package $swarmId 2>&1 | Out-String)
-    Check "packager real run copies script.md" { $realOut -match 'Copied: script.md' }
-    Check "packager real run copies character_bible_delta.json" { $realOut -match 'Copied: character_bible_delta.json' }
-    Check "packager real run copies ambient.wav" { $realOut -match 'Copied: ambient.wav' }
-    Check "script.md now exists in deliverables/" { Test-Path (Join-Path $dryDest 'script.md') }
+    Check "packager real run packages script.md" { $realOut -match 'Packaged: script.md' }
+    Check "packager real run packages character_bible_delta.json" { $realOut -match 'Packaged: character_bible_delta.json' }
+    Check "packager real run packages ambient.wav" { $realOut -match 'Packaged: ambient.wav' }
+    Check "script.md still exists in deliverables/" { Test-Path (Join-Path $dryDest 'script.md') }
     Check ".manifest.json now exists in deliverables/" { Test-Path (Join-Path $dryDest '.manifest.json') }
 
     $manifest = Get-Content (Join-Path $dryDest '.manifest.json') -Raw | ConvertFrom-Json
@@ -142,16 +151,33 @@ try {
     Check "manifest.summary.copied is 3" { $manifest.summary.copied -eq 3 }
     Check "manifest.summary.skipped is 0" { $manifest.summary.skipped -eq 0 }
     Check "manifest.files has 3 entries" { $manifest.files.Count -eq 3 }
+    Check "all files have status ALREADY_PRESENT" {
+        ($manifest.files | ForEach-Object { $_.status } | Sort-Object -Unique) -join ',' -eq 'ALREADY_PRESENT'
+    }
     Check "checksum is 16 hex chars" { $manifest.files[0].checksum.Length -eq 16 }
 
     # -----------------------------------------------------------------------
-    # 5. --package refuses to overwrite (idempotency / refuse-to-overwrite per ADR-015)
+    # 5. --package is idempotent (running it twice produces the same manifest)
     # -----------------------------------------------------------------------
+    # v0.3.16: the old "refuse to overwrite" test no longer applies --
+    # the packager doesn't copy anymore (single-source design). The
+    # new invariant is idempotency: a second --package run produces
+    # the same .manifest.json (modulo the packaged_at timestamp).
     Write-Host ""
-    Write-Host "[5] Packager refuses to overwrite existing files"
+    Write-Host "[5] Packager is idempotent on second run"
     $env:VORTEX_PROJECT = 'pkg_test'
+    $firstManifest = Get-Content (Join-Path $dryDest '.manifest.json') -Raw | ConvertFrom-Json
     $reOut = (& pwsh -NoProfile -File $skillPath --package $swarmId 2>&1 | Out-String)
-    Check "packager refuses to overwrite on second run" { $reOut -match 'EXISTS, refusing to overwrite' }
+    $secondManifest = Get-Content (Join-Path $dryDest '.manifest.json') -Raw | ConvertFrom-Json
+    Check "packager is idempotent (second run has same files[] inventory)" {
+        $firstManifest.files.Count -eq $secondManifest.files.Count -and
+        -not (Compare-Object $firstManifest.files $secondManifest.files -Property file,status,bytes,checksum)
+    }
+    Check "packager is idempotent (second run has same summary)" {
+        $firstManifest.summary.copied -eq $secondManifest.summary.copied -and
+        $firstManifest.summary.skipped -eq $secondManifest.summary.skipped -and
+        $firstManifest.summary.failed -eq $secondManifest.summary.failed
+    }
 
     # -----------------------------------------------------------------------
     # 6. --dispatch-template renders the template + carries prior decision
@@ -705,6 +731,13 @@ Write-Output '===END==='
     $env:VORTEX_PROJECT = 'pkg_v023_audit'
     $delivDir023 = Join-Path $scratchHome 'deliverables\pkg_v023_audit'
     if (Test-Path $delivDir023) { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteDirectory($delivDir023, 'OnlyErrorDialogs', 'SendToRecycleBin') }
+    New-Item -ItemType Directory -Path $delivDir023 -Force | Out-Null
+    # v0.3.16: the packager is single-source. Stage 3 files in the
+    # project dir (simulating the executor's output) so the packager
+    # has something to enumerate + audit.
+    'audit test file 1' | Set-Content -LiteralPath (Join-Path $delivDir023 'audit_1.md') -Encoding UTF8
+    'audit test file 2' | Set-Content -LiteralPath (Join-Path $delivDir023 'audit_2.png') -Encoding UTF8
+    'audit test file 3' | Set-Content -LiteralPath (Join-Path $delivDir023 'audit_3.json') -Encoding UTF8
     # Clear the audit log so we can find our 3 lines
     $auditPath = Join-Path $scratchHome 'memory\audit.jsonl'
     if (Test-Path $auditPath) { [Microsoft.VisualBasic.FileIO.FileSystem]::DeleteFile($auditPath, 'OnlyErrorDialogs', 'SendToRecycleBin') }
@@ -713,12 +746,12 @@ Write-Output '===END==='
     if (Test-Path $auditPath) {
         $auditContent = Get-Content $auditPath -Raw
         Check "G1: dispatch_start was audited as worker.packager" { $auditContent -match '"agent":"worker\.packager".*"action":"dispatch_start"' }
-        Check "G1: deliver was audited for each copied file" { ([regex]::Matches($auditContent, '"action":"deliver"')).Count -ge 3 }
+        Check "G1: deliver was audited for each packaged file" { ([regex]::Matches($auditContent, '"action":"deliver"')).Count -ge 3 }
         Check "G1: dispatch_end was audited" { $auditContent -match '"agent":"worker\.packager".*"action":"dispatch_end"' }
         Check "G1: dispatch_end status is ok or partial" { $auditContent -match '"action":"dispatch_end".*"status":"(ok|partial)"' }
     } else {
         Check "G1: dispatch_start was audited as worker.packager" { $false }
-        Check "G1: deliver was audited for each copied file" { $false }
+        Check "G1: deliver was audited for each packaged file" { $false }
         Check "G1: dispatch_end was audited" { $false }
         Check "G1: dispatch_end status is ok or partial" { $false }
     }
@@ -1201,27 +1234,27 @@ Write-Output '===END==='
     $env:VORTEX_PROJECT = $g29Proj
     $g29TaskId = "g29_swarm_$((Get-Date).Ticks)"
     $g29SwarmDir = Join-Path $swarmsDir "active_$g29TaskId"
-    $g29DelivsDir = Join-Path $g29SwarmDir 'deliverables'
-    if (-not (Test-Path $g29DelivsDir)) {
-        New-Item -ItemType Directory -Path $g29DelivsDir -Force | Out-Null
+    if (-not (Test-Path $g29SwarmDir)) {
+        New-Item -ItemType Directory -Path $g29SwarmDir -Force | Out-Null
     }
-    # Hand-craft 3 files in the swarm's deliverables/. The packager
-    # will copy them to <project>/deliverables/ and include them in
-    # the manifest's file inventory.
-    "g29 file 1 content" | Set-Content -LiteralPath (Join-Path $g29DelivsDir 'g29_file_1.md') -Encoding UTF8
-    "g29 file 2 content" | Set-Content -LiteralPath (Join-Path $g29DelivsDir 'g29_file_2.png') -Encoding UTF8
-    "g29 file 3 content" | Set-Content -LiteralPath (Join-Path $g29DelivsDir 'g29_file_3.json') -Encoding UTF8
-    $g29PkgOut = & pwsh -NoProfile -File $skillPath --package $g29TaskId 2>&1 | Out-String
-    $g29Manifest = Join-Path $scratchHome "deliverables/$g29Proj/.manifest.json"
+    # v0.3.16: the packager is single-source. Files go directly in
+    # <project>/deliverables/ (where the executor writes). The old
+    # <swarmDir>/deliverables/ staging dir is gone.
     $g29DelivsOut = Join-Path $scratchHome "deliverables/$g29Proj"
+    if (-not (Test-Path $g29DelivsOut)) {
+        New-Item -ItemType Directory -Path $g29DelivsOut -Force | Out-Null
+    }
+    "g29 file 1 content" | Set-Content -LiteralPath (Join-Path $g29DelivsOut 'g29_file_1.md') -Encoding UTF8
+    "g29 file 2 content" | Set-Content -LiteralPath (Join-Path $g29DelivsOut 'g29_file_2.png') -Encoding UTF8
+    "g29 file 3 content" | Set-Content -LiteralPath (Join-Path $g29DelivsOut 'g29_file_3.json') -Encoding UTF8
+    $g29PkgOut = & pwsh -NoProfile -File $skillPath --package $g29TaskId 2>&1 | Out-String
+    $g29Manifest = Join-Path $g29DelivsOut '.manifest.json'
     Check "G29a: .manifest.json was written to deliverables/<project>/" { Test-Path $g29Manifest }
     # Parse the manifest and assert the file inventory. v0.3.11.1
     # introduced JSON-parsing for G55/G56; G29 retrofits to the same
-    # pattern (the pre-v0.3.14 test only checked existence; the
-    # v0.3.14 test also asserts the inventory is correct, which catches
-    # a real pre-existing bug: the executor writes to <project>/deliverables/
-    # but the packager reads from <swarmDir>/deliverables/, so the
-    # packager's manifest is always empty after a real dispatch).
+    # pattern (the pre-v0.3.14 test only checked existence; v0.3.16
+    # also asserts the inventory is correct and that every file is
+    # ALREADY_PRESENT, confirming the single-source design).
     $g29ManifestContent = if (Test-Path $g29Manifest) { Get-Content $g29Manifest -Raw } else { '' }
     $g29ManifestJson = $null
     try { $g29ManifestJson = $g29ManifestContent | ConvertFrom-Json } catch {}
@@ -1242,57 +1275,67 @@ Write-Output '===END==='
     Check "G29g: --package exit code is 0 (no error in output)" {
         $g29PkgOut -notmatch 'EXISTS, refusing' -and $g29PkgOut -notmatch 'Copy failed'
     }
+    Check "G29i: all files have status ALREADY_PRESENT (v0.3.16 single-source design)" {
+        $g29ManifestJson -and
+        (($g29ManifestJson.files | ForEach-Object { $_.status } | Sort-Object -Unique) -join ',') -eq 'ALREADY_PRESENT'
+    }
+    Check "G29j: <swarmDir>/deliverables/ does NOT exist (v0.3.16 removed the staging dir)" {
+        -not (Test-Path (Join-Path $g29SwarmDir 'deliverables'))
+    }
 
-    # v0.3.15 (G29h): the v0.3.15 packager-fix scenario. Simulates what
-    # CmdDispatchAgentRoster does after a real --dispatch-template:
-    # writes deliverable files directly to <project>/deliverables/ (the
-    # "executor" output), NOT to <swarmDir>/deliverables/. The pre-v0.3.15
-    # packager would miss these files entirely and write an empty manifest.
-    # The fix makes the packager also enumerate <project>/deliverables/
-    # (the "ALREADY_PRESENT" path) so the manifest includes them.
-    $g29hTaskId = "g29h_swarm_$((Get-Date).Ticks)"
-    $g29hSwarmDir = Join-Path $swarmsDir "active_$g29hTaskId"
-    $g29hDelivsDir = Join-Path $g29hSwarmDir 'deliverables'
-    if (-not (Test-Path $g29hDelivsDir)) {
-        New-Item -ItemType Directory -Path $g29hDelivsDir -Force | Out-Null
-    }
-    # Stage the swarm with EMPTY deliverables (mimics Swarm::Spawn's
-    # initial state). The executor (in real life) would write here in
-    # addition to <project>/deliverables/, but for the regression test
-    # we drop the executor's output directly at <project>/deliverables/
-    # to isolate the packager's source-of-truth.
-    $g29hProj = "g29h_executor_$((Get-Date).Ticks)"
+    # v0.3.16 (G29h): the end-to-end executor->packager flow. Stage
+    # the swarm, run --dispatch-template with the real media-stack
+    # agent (7 plugins, ~30-40s), then verify the manifest
+    # correctly enumerates the executor's deliverables.
+    #
+    # v0.3.16: this test is now the single canonical coverage for the
+    # "executor -> packager" flow. Pre-v0.3.16, the v0.3.15 G29h was
+    # a workaround for the dual-source logic. Now there's only one
+    # source (<project>/deliverables/>) and the test asserts the
+    # end-to-end flow produces a non-empty manifest.
+    #
+    # NOTE: this test is SLOW (~30-40s) because it runs the real
+    # media-stack agent. Pre-v0.3.16 this was the G29 test itself,
+    # which made the G29 flake a real flake. v0.3.14 split it out so
+    # the fast --package path (G29a-j) could verify the packager in
+    # isolation. G29h here is the end-to-end coverage.
+    Write-Host ""
+    Write-Host "[29h] --dispatch-template end-to-end: executor's files show up in the manifest"
+    $g29hProj = "g29h_e2e_$((Get-Date).Ticks)"
     $env:VORTEX_PROJECT = $g29hProj
-    $g29hProjDelivs = Join-Path $scratchHome "deliverables/$g29hProj"
-    if (-not (Test-Path $g29hProjDelivs)) {
-        New-Item -ItemType Directory -Path $g29hProjDelivs -Force | Out-Null
-    }
-    "executor file 1" | Set-Content -LiteralPath (Join-Path $g29hProjDelivs 'executor_1.md') -Encoding UTF8
-    "executor file 2" | Set-Content -LiteralPath (Join-Path $g29hProjDelivs 'executor_2.png') -Encoding UTF8
-    "executor file 3" | Set-Content -LiteralPath (Join-Path $g29hProjDelivs 'executor_3.json') -Encoding UTF8
-    # Also seed one file in the swarm's deliverables/ to verify both
-    # sources are merged (the v0.3.15 packager reads from both).
-    "swarm file" | Set-Content -LiteralPath (Join-Path $g29hDelivsDir 'swarm_only.md') -Encoding UTF8
-    $g29hPkgOut = & pwsh -NoProfile -File $skillPath --package $g29hTaskId 2>&1 | Out-String
-    $g29hManifest = Join-Path $g29hProjDelivs '.manifest.json'
+    $g29hTemplate = Join-Path $swarmsDir 'g29h_e2e.json'
+    $g29hBody = '{"name":"g29h_e2e","version":"0.0.0","objective_template":"smoke","substitutions":{},"deliverables":[],"hitl_gates":[],"self_heal_targets":[],"agent_roster":["media-stack"]}'
+    Set-Content -LiteralPath $g29hTemplate -Value $g29hBody -Encoding UTF8
+    # Measure how long the dispatch takes (the real --dispatch-template
+    # invokes the 7 media-stack plugins and can take 30-40s on the
+    # Windows dev box).
+    $g29hSw = [System.Diagnostics.Stopwatch]::StartNew()
+    $g29hOut = & pwsh -NoProfile -File $skillPath --dispatch-template $g29hTemplate 2>&1 | Out-String
+    $g29hMs = $g29hSw.ElapsedMilliseconds
+    $g29hManifest = Join-Path $scratchHome "deliverables/$g29hProj/.manifest.json"
+    $g29hDelivsOut = Join-Path $scratchHome "deliverables/$g29hProj"
+    $g29hDelivsFiles = if (Test-Path $g29hDelivsOut) {
+        @(Get-ChildItem $g29hDelivsOut -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne '.manifest.json' } | Select-Object -ExpandProperty Name)
+    } else { @() }
     $g29hManifestContent = if (Test-Path $g29hManifest) { Get-Content $g29hManifest -Raw } else { '' }
     $g29hManifestJson = $null
     try { $g29hManifestJson = $g29hManifestContent | ConvertFrom-Json } catch {}
-    Check "G29h: --package enumerates executor's files in <project>/deliverables/ (not just swarm's)" {
-        # 4 files: 3 from executor (ALREADY_PRESENT) + 1 from swarm (COPIED)
+    Check "G29h: --dispatch-template (real media-stack) writes a non-empty manifest within 90s" {
+        $g29hMs -lt 90000 -and $g29hManifestJson -and $g29hManifestJson.files -is [array] -and
+        $g29hManifestJson.files.Count -ge 1
+    }
+    Check "G29h: --dispatch-template manifest.files[] enumerates the executor's actual deliverables" {
+        # The manifest should have at least one entry whose filename
+        # matches a file in the project dir. (The exact set of
+        # files depends on which media-stack plugins succeed; in
+        # practice we get cover/music/portrait files.)
         $g29hManifestJson -and $g29hManifestJson.files -is [array] -and
-        $g29hManifestJson.files.Count -eq 4
+        $g29hManifestJson.files.Count -ge 1 -and
+        $g29hManifestJson.files.Count -eq $g29hDelivsFiles.Count
     }
-    Check "G29h: --package marks executor's files as ALREADY_PRESENT" {
-        $g29hManifestJson -and
-        ($g29hManifestJson.files | Where-Object { $_.file -eq 'executor_1.md' -and $_.status -eq 'ALREADY_PRESENT' }) -ne $null
-    }
-    Check "G29h: --package marks swarm's files as COPIED (the new src dir was empty before, files were copied)" {
-        $g29hManifestJson -and
-        ($g29hManifestJson.files | Where-Object { $_.file -eq 'swarm_only.md' -and $_.status -eq 'COPIED' }) -ne $null
-    }
-    Check "G29h: --package summary.copied == 4 (3 ALREADY_PRESENT + 1 COPIED, all count as delivered)" {
-        $g29hManifestJson -and $g29hManifestJson.summary.copied -eq 4
+    Check "G29h: every manifest entry is ALREADY_PRESENT (v0.3.16 single-source)" {
+        $g29hManifestJson -and $g29hManifestJson.files -is [array] -and
+        ($g29hManifestJson.files | ForEach-Object { $_.status } | Sort-Object -Unique) -join ',' -eq 'ALREADY_PRESENT'
     }
 
     # -----------------------------------------------------------------------
