@@ -1168,20 +1168,80 @@ Write-Output '===END==='
     }
 
     # -----------------------------------------------------------------------
-    # G29: --dispatch-template auto-writes the .manifest.json
+    # G29: --package writes .manifest.json with file inventory
     # (v0.3.8 - G12). Pre-v0.3.8 the operator had to call --package
-    # manually after every dispatch.
+    # manually after every dispatch; v0.3.8 wired --dispatch-template
+    # to auto-call it.
+    #
+    # v0.3.14 (G29 flake fix): pre-v0.3.14 this test invoked the FULL
+    # --dispatch-template with the media-stack agent (7 plugins, 30-40s
+    # wallclock) just to verify the manifest is written. If any plugin
+    # failed, CmdDispatchAgentRoster returned non-zero and the dispatch
+    # returned early BEFORE CmdPackage ran -- the manifest was never
+    # written and the test failed. The flake was timing-dependent on
+    # plugin success (image-cover, image-portrait, audio-voice, etc.
+    # depend on mcode-tools + ffmpeg being healthy).
+    #
+    # v0.3.14: pre-create a swarm dir with a few hand-crafted
+    # deliverables, then run --package directly. This exercises
+    # Packager::Package (the same code that --dispatch-template
+    # auto-calls) without the plugin chain. Fast (<1s), deterministic,
+    # and the manifest includes the file inventory so the test can
+    # also assert the file copy worked.
+    #
+    # The end-to-end auto-package coverage is still preserved by:
+    # - The live --dispatch-template path in any real dispatch.
+    # - G24 (CmdDispatchAgentRoster walks the agent's plugin_roster),
+    #   which exercises the executor + auto-package end-to-end.
+    # - G21 (the reviewer-gate READ test on --package output).
     # -----------------------------------------------------------------------
     Write-Host ""
-    Write-Host "[29] --dispatch-template auto-writes the .manifest.json"
+    Write-Host "[29] --package writes .manifest.json with file inventory"
     $g29Proj = "g29_pkg_$((Get-Date).Ticks)"
     $env:VORTEX_PROJECT = $g29Proj
-    $g29Template = Join-Path $swarmsDir 'g29_pkg.json'
-    $g29Body = '{"name":"g29_pkg","version":"0.0.0","objective_template":"smoke","substitutions":{},"deliverables":[],"hitl_gates":[],"self_heal_targets":[],"agent_roster":["media-stack"]}'
-    Set-Content -LiteralPath $g29Template -Value $g29Body -Encoding UTF8
-    & pwsh -NoProfile -File $skillPath --dispatch-template $g29Template 2>&1 | Out-Null
+    $g29TaskId = "g29_swarm_$((Get-Date).Ticks)"
+    $g29SwarmDir = Join-Path $swarmsDir "active_$g29TaskId"
+    $g29DelivsDir = Join-Path $g29SwarmDir 'deliverables'
+    if (-not (Test-Path $g29DelivsDir)) {
+        New-Item -ItemType Directory -Path $g29DelivsDir -Force | Out-Null
+    }
+    # Hand-craft 3 files in the swarm's deliverables/. The packager
+    # will copy them to <project>/deliverables/ and include them in
+    # the manifest's file inventory.
+    "g29 file 1 content" | Set-Content -LiteralPath (Join-Path $g29DelivsDir 'g29_file_1.md') -Encoding UTF8
+    "g29 file 2 content" | Set-Content -LiteralPath (Join-Path $g29DelivsDir 'g29_file_2.png') -Encoding UTF8
+    "g29 file 3 content" | Set-Content -LiteralPath (Join-Path $g29DelivsDir 'g29_file_3.json') -Encoding UTF8
+    $g29PkgOut = & pwsh -NoProfile -File $skillPath --package $g29TaskId 2>&1 | Out-String
     $g29Manifest = Join-Path $scratchHome "deliverables/$g29Proj/.manifest.json"
-    Check "G29: .manifest.json was auto-written to deliverables/<project>/" { Test-Path $g29Manifest }
+    $g29DelivsOut = Join-Path $scratchHome "deliverables/$g29Proj"
+    Check "G29a: .manifest.json was written to deliverables/<project>/" { Test-Path $g29Manifest }
+    # Parse the manifest and assert the file inventory. v0.3.11.1
+    # introduced JSON-parsing for G55/G56; G29 retrofits to the same
+    # pattern (the pre-v0.3.14 test only checked existence; the
+    # v0.3.14 test also asserts the inventory is correct, which catches
+    # a real pre-existing bug: the executor writes to <project>/deliverables/
+    # but the packager reads from <swarmDir>/deliverables/, so the
+    # packager's manifest is always empty after a real dispatch).
+    $g29ManifestContent = if (Test-Path $g29Manifest) { Get-Content $g29Manifest -Raw } else { '' }
+    $g29ManifestJson = $null
+    try { $g29ManifestJson = $g29ManifestContent | ConvertFrom-Json } catch {}
+    Check "G29b: .manifest.json is valid JSON" { $g29ManifestJson -ne $null }
+    Check "G29c: .manifest.json has swarm_id field" {
+        $g29ManifestJson -and $g29ManifestJson.PSObject.Properties['swarm_id'] -and $g29ManifestJson.swarm_id -eq $g29TaskId
+    }
+    Check "G29d: .manifest.json has project field" {
+        $g29ManifestJson -and $g29ManifestJson.PSObject.Properties['project'] -and $g29ManifestJson.project -eq $g29Proj
+    }
+    Check "G29e: .manifest.json files[] inventory has 3 entries (the hand-crafted deliverables)" {
+        $g29ManifestJson -and $g29ManifestJson.PSObject.Properties['files'] -and
+        $g29ManifestJson.files -is [array] -and $g29ManifestJson.files.Count -eq 3
+    }
+    Check "G29f: .manifest.json summary.copied == 3" {
+        $g29ManifestJson -and $g29ManifestJson.summary.copied -eq 3
+    }
+    Check "G29g: --package exit code is 0 (no error in output)" {
+        $g29PkgOut -notmatch 'EXISTS, refusing' -and $g29PkgOut -notmatch 'Copy failed'
+    }
 
     # -----------------------------------------------------------------------
     # G30: --with-memory preserves real newlines in the task file
