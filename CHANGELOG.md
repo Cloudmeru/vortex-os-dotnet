@@ -4,6 +4,78 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.16] — 2026-08-31
+
+### Fixed — packager single-source-of-truth (G29 underlying bug, design cleanup)
+
+v0.3.15 worked around the underlying design issue with a dual-source
+merge in `Packager::Package` (the executor's files at
+`<project>/deliverables/` and the legacy `<swarmDir>/deliverables/>
+staging dir). v0.3.16 fixes the design, not the symptom.
+
+### Why v0.3.15 was a workaround
+
+The original bash engine (v0.3.0-v0.3.7) had the executor write to
+`<swarmDir>/deliverables/>` and the packager copy from there to
+`<project>/deliverables/>`. The C++ port changed the executor to
+write directly to `<project>/deliverables/>` (skipping the staging
+dir) but never updated the packager. The staging dir was still
+created by `Swarm::Spawn`, but nothing wrote to it.
+
+Pre-v0.3.15, the packager was hard-coded to read from the empty
+staging dir, so `manifest.files[]` was always `[]` after a real
+dispatch. v0.3.15 added a dual-source merge to pick up the
+executor's files. v0.3.16 removes the staging dir entirely
+(`Swarm::Spawn` no longer creates it) and makes the packager
+single-source: it reads from `<project>/deliverables/>` directly.
+
+### What changed
+
+- **`Swarm::Spawn` no longer creates `<swarmDir>/deliverables/>`.**
+  That subdirectory was a v0.3.0-v0.3.7 artifact that nothing
+  wrote to. Removing it eliminates the dead code.
+- **`Packager::Package` is single-source.** Reads from
+  `<project>/deliverables/>` (= the destination). No more
+  dual-source enumeration loop, no more `ALREADY_PRESENT` vs
+  `COPIED` distinction — every file is enumerated and marked
+  `ALREADY_PRESENT` in the manifest. No more "refuse to overwrite"
+  branches (they were dead code in the new design).
+- **Manifest shape unchanged.** Same fields, same `ALREADY_PRESENT`
+  status, same `summary.copied/skipped/failed` fields. The
+  only observable change: `files[]` is now non-empty after a
+  real `--dispatch-template` (it always should have been).
+
+### Test changes
+
+- **G4** rewritten: packager test puts files in
+  `<project>/deliverables/>` (new source), expects
+  "Packaged: <name>" output, tests idempotency (second run
+  produces the same manifest).
+- **G29a-g** rewritten: same as above for the G29 manifest test.
+- **G29h** rewritten: end-to-end `--dispatch-template` test
+  (real media-stack, ~30-40s) that asserts the manifest
+  correctly enumerates the executor's actual deliverables.
+  This is the v0.3.16 G29h; the v0.3.15 G29h (which tested
+  the dual-source merge) is no longer needed.
+- **G29i, G29j** new sub-checks: assert that all files are
+  `ALREADY_PRESENT` (single-source design) and that
+  `<swarmDir>/deliverables/>` doesn't exist (staging dir removed).
+- **G1** updated: pre-creates files in the project dir so the
+  packager has something to enumerate + audit.
+- **G5** rewritten: tests idempotency (running `--package` twice
+  produces the same `files[]` inventory and `summary`).
+
+### Acceptance
+
+- **360/360 PASS** (was 357/357 at v0.3.15; +3 new sub-checks: G5
+  idempotency files[], G5 idempotency summary, G29i, G29j).
+- Build: `Vortex.dll` 176 KB (down from 178.5 KB at v0.3.15; the
+  dual-source logic was removed, not just refactored).
+- Backwards compat: no public API change. `--package` is the same
+  operator-facing verb it has been since v0.3.5. The manifest
+  shape is the same. The only behavior change: `files[]` is
+  now non-empty after a real dispatch.
+
 ## [0.3.12] — 2026-08-31
 
 ### Added — Phase 2a of the cross-OS CLI contract (the 4 streaming verbs)
