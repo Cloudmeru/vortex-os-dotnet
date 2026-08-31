@@ -2121,6 +2121,13 @@ static int CmdHelp() {
     Console::WriteLine("       [--protagonist=...] [--antagonist=...] [--setting=...]");
     Console::WriteLine("  --dispatch-v4 <task_id> <agent>       Direct V4 pipeline dispatch");
     Console::WriteLine();
+    Console::WriteLine("MAINTENANCE (operator-only escape hatches; not part of the regular flow):");
+    Console::WriteLine("  --reviewer-patch <template.json> <swarm_id>");
+    Console::WriteLine("       Re-apply the reviewer-gate patch to an existing plan.json.");
+    Console::WriteLine("       Useful when an operator has hand-edited plan.json or when");
+    Console::WriteLine("       the dispatcher is run against a template without going through");
+    Console::WriteLine("       the full --dispatch-template flow. Test entry point for G31.");
+    Console::WriteLine();
     Console::WriteLine("PACKAGING (collect swarm deliverables into project dir):");
     Console::WriteLine("  --package <swarm_id> [--dry-run]      Copy + write .manifest.json");
     Console::WriteLine();
@@ -2334,6 +2341,49 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
             }
         }
         return CmdDispatchTemplate(p, args[1], ep, overrides->ToArray(), taskId);
+    }
+    if (cmd == "--reviewer-patch") {
+        // v0.3.13 (G31 flaky fix): expose PatchPlanJsonWithReviewer as a
+        // standalone CLI verb so operators (and the G31 regression test)
+        // can apply the reviewer-gate patch without running the full
+        // --dispatch-template flow. Pre-v0.3.13 the only way to exercise
+        // this path was to run the full media-stack dispatch (7 plugins,
+        // 30-40s wallclock), which made the G31 regression test
+        // time-dependent and made the suite hit the 600s wallclock
+        // budget before G31 could run.
+        //
+        // Usage: skill.exe --reviewer-patch <template.json> <swarm_id>
+        //   <template.json>  the dispatch template (must have agent_roster)
+        //   <swarm_id>       the bare task id (NOT "active_<id>"; same
+        //                    convention as --dispatch-template / CmdPackage)
+        //
+        // Looks for the plan at: <SwarmsDir>/active_<swarm_id>/plan.json
+        // Patches it with reviewer (string) + agent_roster (string array).
+        // Returns 0 on success, 1 if the plan doesn't exist (so the test
+        // can distinguish "no patch needed" from "real failure"), 2 on
+        // bad args.
+        if (args->Length < 3) {
+            ConsoleX::Err("Usage: skill.exe --reviewer-patch <template.json> <swarm_id>");
+            return 2;
+        }
+        String^ templateFile = args[1];
+        String^ swarmId = args[2];
+        if (!File::Exists(templateFile)) {
+            ConsoleX::Err("--reviewer-patch: template not found: " + templateFile);
+            return 2;
+        }
+        String^ planPath = Path::Combine(p->SwarmsDir, "active_" + swarmId, "plan.json");
+        if (!File::Exists(planPath)) {
+            ConsoleX::Err("--reviewer-patch: plan.json not found at " + planPath);
+            return 1;
+        }
+        try {
+            PatchPlanJsonWithReviewer(p, templateFile, swarmId);
+        } catch (Exception^ ex) {
+            ConsoleX::Err("--reviewer-patch failed: " + ex->Message);
+            return 1;
+        }
+        return 0;
     }
     if (cmd == "--recipe") {
         // v0.3.5 + v0.3.6 fix: --recipe <name> resolves to

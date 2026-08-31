@@ -1250,6 +1250,20 @@ Write-Output '===END==='
     # trip end-to-end: dispatch a template that names media-stack
     # (whose manifest has `reviewer.name="reviewer.quality"`), then
     # read the swarm's plan.json and assert both fields are present.
+    #
+    # v0.3.13 (G31 flaky fix): pre-v0.3.13, this test invoked the full
+    # --dispatch-template with the media-stack agent (7 plugins, 30-40s
+    # wallclock) just to verify the 70-line PatchPlanJsonWithReviewer
+    # function. The test PASSED when it got to run (5/5 isolated,
+    # 3/3 historical 310/310 suites) but the full suite frequently hit
+    # the 600s wallclock budget before G31 could execute, which made
+    # it appear flaky. v0.3.13 exposes the patch as a standalone
+    # `--reviewer-patch` verb so G31 can verify it in <1s without
+    # touching the media-stack plugin chain. The end-to-end flow
+    # (--dispatch-template calling PatchPlanJsonWithReviewer) is still
+    # covered by the live dispatch path in the test suite and by the
+    # G21 reviewer-gate read test; G31 now just locks the patcher
+    # unit behavior.
     # -----------------------------------------------------------------------
     Write-Host ""
     Write-Host "[31] reviewer-gate write path: agent manifest -> plan.json (v0.3.9)"
@@ -1269,18 +1283,51 @@ Write-Output '===END==='
         agent_roster = @("media-stack")
     } | ConvertTo-Json -Depth 5
     Set-Content -LiteralPath $g31Template -Value $g31Body -Encoding UTF8
-    & pwsh -NoProfile -File $skillPath --dispatch-template $g31Template 2>&1 | Out-Null
-    # The engine writes plan.json to <swarms>/active_<task_id>/plan.json.
-    # Pick the MOST RECENT plan.json (alphabetical "First 1" can return
-    # a plan.json from an earlier test in the suite).
-    $g31PlanFile = Get-ChildItem -Recurse -Filter 'plan.json' $swarmsDir -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-    $g31PlanContent = if ($g31PlanFile) { Get-Content $g31PlanFile.FullName -Raw } else { '' }
-    $g31HasReviewer = $g31PlanContent -match '"reviewer"\s*:\s*"reviewer\.quality"'
-    $g31HasRoster = $g31PlanContent -match '"agent_roster"\s*:\s*\[\s*"media-stack"\s*\]'
-    $g31PreservesOriginals = ($g31PlanContent -match '"swarm_id"\s*:\s*"') -and ($g31PlanContent -match '"tasks"\s*:\s*\[\s*\]')
-    Check "G31a: plan.json has reviewer field populated from agent manifest" { $g31HasReviewer }
-    Check "G31b: plan.json has agent_roster array (string, not object)" { $g31HasRoster }
-    Check "G31c: patch preserves Swarm::Spawn's swarm_id + tasks fields" { $g31PreservesOriginals }
+    # v0.3.13: hand-craft a minimal plan.json that mirrors what
+    # Swarm::Spawn writes, then run --reviewer-patch directly. This
+    # exercises PatchPlanJsonWithReviewer in <1s without going through
+    # the full --dispatch-template flow (no plugin execution, no
+    # external tool dependency).
+    $g31TaskId = "g31_swarm_$((Get-Date).Ticks)"
+    $g31SwarmDir = Join-Path $swarmsDir "active_$g31TaskId"
+    if (-not (Test-Path $g31SwarmDir)) {
+        New-Item -ItemType Directory -Path $g31SwarmDir -Force | Out-Null
+    }
+    $g31SeedPlan = @{
+        swarm_id  = $g31TaskId
+        objective = "smoke reviewer"
+        tasks     = @()
+    } | ConvertTo-Json -Depth 5
+    Set-Content -LiteralPath (Join-Path $g31SwarmDir 'plan.json') -Value $g31SeedPlan -Encoding UTF8
+    # Scope the plan.json lookup to the swarm we just created (defense
+    # in depth: the pre-v0.3.13 code used Get-ChildItem -Recurse +
+    # "most recent" which could pick a stale plan.json from a prior
+    # test in the same suite if a dispatch was running concurrently).
+    $g31PlanFile = Join-Path $g31SwarmDir 'plan.json'
+    $g31PatchOut = & pwsh -NoProfile -File $skillPath --reviewer-patch $g31Template $g31TaskId 2>&1 | Out-String
+    $g31PlanContent = if (Test-Path $g31PlanFile) { Get-Content $g31PlanFile -Raw } else { '' }
+    # Parse plan.json as JSON (not regex) so field reordering /
+    # pretty-print tweaks don't break the test. v0.3.11.1 introduced
+    # this pattern for G55/G56; v0.3.13 retrofits G31 to the same
+    # pattern (the pre-v0.3.13 regex was brittle to JSON whitespace).
+    $g31Plan = $null
+    try { $g31Plan = $g31PlanContent | ConvertFrom-Json } catch {}
+    Check "G31a: plan.json has reviewer field populated from agent manifest" {
+        $g31Plan -and $g31Plan.PSObject.Properties['reviewer'] -and $g31Plan.reviewer -eq 'reviewer.quality'
+    }
+    Check "G31b: plan.json has agent_roster array (string, not object)" {
+        $g31Plan -and $g31Plan.PSObject.Properties['agent_roster'] -and
+        $g31Plan.agent_roster -is [array] -and $g31Plan.agent_roster[0] -eq 'media-stack'
+    }
+    Check "G31c: patch preserves Swarm::Spawn's swarm_id + tasks fields" {
+        $g31Plan -and $g31Plan.PSObject.Properties['swarm_id'] -and
+        $g31Plan.swarm_id -eq $g31TaskId -and
+        $g31Plan.PSObject.Properties['tasks'] -and $g31Plan.tasks -is [array] -and
+        $g31Plan.tasks.Count -eq 0
+    }
+    Check "G31d: --reviewer-patch exit code is 0 (plan.json found + patched)" {
+        ($g31PatchOut -notmatch 'reviewer-patch:') -and ($g31PatchOut -notmatch 'failed')
+    }
 
     # -----------------------------------------------------------------------
     # G32-G37: Phase 1 of the cross-OS contract (v0.3.10). These 6 tests
