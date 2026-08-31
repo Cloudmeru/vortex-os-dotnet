@@ -26,7 +26,10 @@ namespace Vortex {
         // Package one swarm's deliverables into the project's durable dir.
         // Returns 0 on success, 2 on bad input, 1 on partial failure.
         // If -DryRun is set, prints what would happen without writing.
-        static int Package(Paths^ p, String^ swarmId, bool dryRun);
+        // If -AsJson is set, emits a single summary JSON line on stdout
+        // (the text output is still emitted; the JSON line is the
+        // machine-readable summary that consumers parse). v0.3.17.
+        static int Package(Paths^ p, String^ swarmId, bool dryRun, bool asJson);
 
         // Compute a short, content-aware checksum (length + first-1KB SHA-1
         // truncated to 16 hex chars). Exposed for unit testing.
