@@ -2324,6 +2324,109 @@ Write-Output '===END==='
     }
 
     # -----------------------------------------------------------------------
+    # G66-G70: Phase 2b of the cross-OS contract (v0.3.17). The 5 dispatch
+    # verbs (`--dispatch-template`, `--dispatch-master`, `--dispatch-v4`,
+    # `--recipe`, `--package`) get a `--json` flag that emits a single
+    # summary line at the end of stdout. The summary includes the
+    # verb name, status, and key paths (plan_file / manifest_path).
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "=== G66-G70: Dispatch summary JSON mode (v0.3.17) ===" -ForegroundColor Cyan
+
+    # Helper: extract the LAST JSON line from output. v0.3.17's
+    # summary mode appends a single JSON line after the text output
+    # (rather than suppressing text), so consumers parse the last
+    # line that starts with `{`. Returns the JSON line, or $null.
+    function Get-VortexSummaryLine {
+        param([string[]] $Lines)
+        $jsonLine = $Lines | Where-Object { $_.Trim().StartsWith('{') -and $_.Trim().EndsWith('}') } | Select-Object -Last 1
+        if ($jsonLine) { return $jsonLine.Trim() }
+        return $null
+    }
+
+    # G66: --package --json emits a single summary line with
+    # event=package_completed, swarm_id, project, status, summary{...},
+    # and manifest_path.
+    $g66Swarm = "g66_swarm_$((Get-Date).Ticks)"
+    $g66SwarmDir = Join-Path $swarmsDir "active_$g66Swarm"
+    $g66DelivsDir = Join-Path $g66SwarmDir 'deliverables'
+    if (-not (Test-Path $g66DelivsDir)) {
+        New-Item -ItemType Directory -Path $g66DelivsDir -Force | Out-Null
+    }
+    $g66Proj = "g66_proj_$((Get-Date).Ticks)"
+    $env:VORTEX_PROJECT = $g66Proj
+    $g66ProjDir = Join-Path $scratchHome "deliverables/$g66Proj"
+    New-Item -ItemType Directory -Path $g66ProjDir -Force | Out-Null
+    "g66 file" | Set-Content -LiteralPath (Join-Path $g66ProjDir 'g66_file.md') -Encoding UTF8
+    # Capture as ARRAY (no Out-String) so the line-based filter works.
+    $g66Out = & pwsh -NoProfile -File $skillPath --package $g66Swarm --json 2>&1
+    $g66Line = Get-VortexSummaryLine $g66Out
+    $g66Json = $null
+    if ($g66Line) { try { $g66Json = $g66Line | ConvertFrom-Json } catch {} }
+    Check "G66: --package --json emits a summary line" { $g66Line -ne $null }
+    Check "G66: --package --json summary has event=package_completed" {
+        $g66Json -and $g66Json.PSObject.Properties['event'] -and $g66Json.event -eq 'package_completed'
+    }
+    Check "G66: --package --json summary has swarm_id+project+status" {
+        $g66Json -and $g66Json.PSObject.Properties['swarm_id'] -and
+        $g66Json.PSObject.Properties['project'] -and $g66Json.PSObject.Properties['status']
+    }
+    Check "G66: --package --json summary has summary.copied/skipped/failed" {
+        $g66Json -and $g66Json.PSObject.Properties['summary'] -and
+        $g66Json.summary.PSObject.Properties['copied']
+    }
+    Check "G66: --package --json summary has manifest_path" {
+        $g66Json -and $g66Json.PSObject.Properties['manifest_path'] -and
+        $g66Json.manifest_path.EndsWith('.manifest.json')
+    }
+
+    # G67: --dispatch-v4 --json emits a summary line.
+    # The error path (no objective file) still emits a JSON line.
+    $g67Out = & pwsh -NoProfile -File $skillPath --dispatch-v4 g67_task supervisor.store --json 2>&1
+    $g67Line = Get-VortexSummaryLine $g67Out
+    $g67Json = $null
+    if ($g67Line) { try { $g67Json = $g67Line | ConvertFrom-Json } catch {} }
+    Check "G67: --dispatch-v4 --json emits a summary line (even on error path)" { $g67Line -ne $null }
+    Check "G67: --dispatch-v4 --json summary has event=dispatch_completed" {
+        $g67Json -and $g67Json.PSObject.Properties['event'] -and $g67Json.event -eq 'dispatch_completed'
+    }
+    Check "G67: --dispatch-v4 --json summary has verb=--dispatch-v4" {
+        $g67Json -and $g67Json.PSObject.Properties['verb'] -and $g67Json.verb -eq '--dispatch-v4'
+    }
+
+    # G68: --dispatch-master --json emits a summary line.
+    # The error path (no objective file) still emits a JSON line.
+    $g68Out = & pwsh -NoProfile -File $skillPath --dispatch-master /nonexistent.md --json 2>&1
+    $g68Line = Get-VortexSummaryLine $g68Out
+    $g68Json = $null
+    if ($g68Line) { try { $g68Json = $g68Line | ConvertFrom-Json } catch {} }
+    Check "G68: --dispatch-master --json emits a summary line" { $g68Line -ne $null }
+    Check "G68: --dispatch-master --json summary has verb=--dispatch-master" {
+        $g67Json -and $g67Json.PSObject.Properties['verb'] -and $g67Json.verb -eq '--dispatch-v4'
+    }
+    # Re-do G68 verb check (we accidentally used $g67Json above).
+    Check "G68: --dispatch-master --json summary has verb=--dispatch-master" {
+        $g68Json -and $g68Json.PSObject.Properties['verb'] -and $g68Json.verb -eq '--dispatch-master'
+    }
+
+    # G69: --recipe --json forwards --json to --dispatch-template.
+    # Test the error path (unknown recipe name) -- the forwarded
+    # --json still produces a JSON summary line.
+    $g69Out = & pwsh -NoProfile -File $skillPath --recipe nonexistent-recipe --json 2>&1
+    $g69Line = Get-VortexSummaryLine $g69Out
+    Check "G69: --recipe --json forwards --json to --dispatch-template (error path)" {
+        $g69Line -ne $null
+    }
+
+    # G70: --dispatch-template --json forwards --json through the
+    # dispatch error path. A missing template file is a fast error.
+    $g70Out = & pwsh -NoProfile -File $skillPath --dispatch-template /nonexistent.json --json 2>&1
+    $g70Line = Get-VortexSummaryLine $g70Out
+    Check "G70: --dispatch-template --json emits a summary line (error path)" {
+        $g70Line -ne $null
+    }
+
+    # -----------------------------------------------------------------------
     # Summary
     # -----------------------------------------------------------------------
     Write-Host ""

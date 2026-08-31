@@ -4,6 +4,101 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.17] — 2026-08-31
+
+### Added — Dispatch summary JSON mode (Phase 2b, G66–G70)
+
+The CLI JSON contract (`docs/cli-json-contract.md`) was extended in
+Phases 1 and 1.1 to the read-side verbs (`--decision-record`,
+`--cost-report`, `--agents-trace`, etc.) and Phase 2a (v0.3.12)
+added the streaming verbs (`--stream`, `--stream-stop`,
+`--stream-finalize`, `--hint`). Phase 2b finishes the write-side
+dispatch verbs so every dispatch action has a machine-readable
+summary line.
+
+Five new `--json` summary modes, each emitting a single JSON line
+at the end of the dispatch (text banners and logs are unchanged;
+consumers parse the last line that starts with `{`):
+
+| Verb                       | Event name             | Key fields added in summary                                                  |
+|----------------------------|------------------------|------------------------------------------------------------------------------|
+| `--package`                | `package_completed`    | `swarm_id`, `project`, `status`, `summary{copied,skipped,failed}`, `manifest_path` |
+| `--dispatch-v4`            | `dispatch_completed`   | `verb`, `task_id`, `agent`, `plan_file`                                      |
+| `--dispatch-master`        | `dispatch_completed`   | `verb`, `objective_file`, `swarm_id`, `plan_file`                            |
+| `--dispatch-template`      | `dispatch_completed`   | `verb`, `task_id`, `project`, `manifest`                                     |
+| `--recipe`                 | `dispatch_completed`   | inherits all `--dispatch-template` fields (the existing `forwarded->Add(a)` loop already passed `--json` through) |
+
+### Why the design appends a JSON line instead of suppressing text
+
+The contract doc (`docs/cli-json-contract.md`) does not forbid
+mixed output, and the v0.3.10–v0.3.12 `--json` modes for read-side
+verbs already use this "summary line at the end" pattern. The
+consumer parses the LAST line that starts with `{` and ends with
+`}`. Text banners and audit logs are unchanged so a human running
+the same command in a terminal still sees the rich output.
+
+Suppressing text is left to a future commit — it would require
+wrapping every `ConsoleX::*` call in a conditional, which is a
+larger change with a low ROI given that consumers already filter
+for the JSON line.
+
+### Why `--recipe` got its own JSON-aware error path
+
+`--recipe <name>` resolves `<skill>/templates/<name>.json` and
+forwards to `--dispatch-template`. The forwarded `--json` would
+have produced a JSON summary line once `--dispatch-template` ran,
+but the recipe-name check fails BEFORE the forward happens, so
+`--recipe nonexistent-recipe --json` returned a plain text error
+and never reached the JSON-emitting dispatcher. v0.3.17 adds a
+JSON detection loop in the recipe handler so the error path
+("recipe not found", "missing recipe name") emits the same
+`{"event":"dispatch_completed","verb":"--recipe","status":"error",...}`
+shape as the other verbs.
+
+### Tests
+
+- **G66** – `--package --json` (success path): emits a single
+  summary line with `event=package_completed`, `swarm_id`,
+  `project`, `status`, `summary.copied/skipped/failed`, and
+  `manifest_path` ending in `.manifest.json`. 5 sub-checks.
+- **G67** – `--dispatch-v4 --json` (error path): emits a summary
+  line with `event=dispatch_completed` and `verb=--dispatch-v4`.
+  3 sub-checks.
+- **G68** – `--dispatch-master --json` (error path): emits a
+  summary line with `verb=--dispatch-master`. 2 sub-checks.
+- **G69** – `--recipe --json` (error path: unknown recipe name):
+  emits a JSON error summary line. 1 sub-check.
+- **G70** – `--dispatch-template --json` (error path: missing
+  template file): emits a summary line. 1 sub-check.
+
+**Total: 13 new sub-checks, 373/373 PASS (was 360/360 at v0.3.16,
+0 regressions).**
+
+### Files
+
+- `src/lib/Packager.h` (+2 lines: `bool asJson` parameter)
+- `src/lib/Packager.cpp` (+24/-2 lines: summary-line emission at
+  the end of `Package`, gated on `asJson`)
+- `src/skill.cpp` (+~80 lines: `--json` parsing + summary-line
+  emission in the 4 dispatcher arms; +12 lines for the JSON-aware
+  recipe error path)
+- `tests/test_engine.ps1` (+75 lines: G66–G70 blocks; the
+  `Get-VortexSummaryLine` helper filters the last `{...}` line
+  from the captured `[string[]]` output)
+
+### Build artifact
+
+Vortex.dll 179 KB (was 178.5 KB at v0.3.16, +0.5 KB for the new
+JSON summary paths and the recipe error handling).
+
+### Backward compat
+
+- Default mode (no `--json`) is unchanged for all five verbs.
+- The contract doc does not forbid mixed text+JSON output, so
+  the v0.3.10–v0.3.12 "summary line at the end" pattern is
+  preserved.
+- Manifest shape and packager behavior are unchanged from v0.3.16.
+
 ## [0.3.16] — 2026-08-31
 
 ### Fixed — packager single-source-of-truth (G29 underlying bug, design cleanup)

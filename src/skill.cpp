@@ -59,7 +59,7 @@ static int CmdDispatchAgentRoster(Paths^ p, String^ templatePath, String^ taskId
 // Forward decl -- defined at line ~310 below. v0.3.8 (G12) calls it
 // after the executor walks the roster, to write the durable
 // .manifest.json automatically.
-static int CmdPackage(Paths^ p, String^ swarmId, bool dryRun);
+static int CmdPackage(Paths^ p, String^ swarmId, bool dryRun, bool asJson);
 // v0.3.9: complete the v0.3.5 reviewer-gate write path. Reads the
 // template's agent_roster, finds the first agent with a
 // `reviewer.name` block in its manifest, and patches plan.json to
@@ -147,7 +147,7 @@ static int CmdDispatchTemplate(Paths^ p, String^ templateFile, int episodeNumber
     try {
         // Packager::Package prepends "active_" internally, so pass the
         // bare taskId (golden_path_<ts>), not "active_golden_path_<ts>".
-        CmdPackage(p, actualTaskId, false);
+        CmdPackage(p, actualTaskId, false, false);
     } catch (Exception^ ex) {
         ConsoleX::Warn("auto-package skipped: " + ex->Message);
     }
@@ -435,9 +435,9 @@ static void PatchPlanJsonWithReviewer(Paths^ p, String^ templateFile, String^ sw
 // (the engine emits a "REVIEWER_INVOKE:" line the operator can use to
 // trigger --plugin-test on the named reviewer, OR a future version of
 // the engine will auto-invoke it).
-static int CmdPackage(Paths^ p, String^ swarmId, bool dryRun) {
+static int CmdPackage(Paths^ p, String^ swarmId, bool dryRun, bool asJson) {
     if (String::IsNullOrEmpty(swarmId)) {
-        return Packager::Package(p, swarmId, dryRun);
+        return Packager::Package(p, swarmId, dryRun, asJson);
     }
     String^ planPath = Path::Combine(p->SwarmsDir, swarmId, "plan.json");
     if (File::Exists(planPath)) {
@@ -484,7 +484,7 @@ static int CmdPackage(Paths^ p, String^ swarmId, bool dryRun) {
             ConsoleX::Warn("Reviewer gate check skipped: " + ex->Message);
         }
     }
-    return Packager::Package(p, swarmId, dryRun);
+    return Packager::Package(p, swarmId, dryRun, asJson);
 }
 
 // Append a decision to the durable history (used by the HITL gates on
@@ -2278,19 +2278,43 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     // Dispatch ---------------------------------------------------------------
     if (cmd == "--dispatch-v4") {
         if (args->Length < 3) { ConsoleX::Err("Usage: skill.exe --dispatch-v4 <task_id> <agent> [objective_ref]"); return 2; }
-        String^ ref = (args->Length >= 4) ? args[3] : nullptr;
-        return DispatchV4::Run(p, args[1], args[2], ref);
+        bool asJson = false;
+        for (int i = 3; i < args->Length; i++) if (args[i] == "--json") asJson = true;
+        String^ ref = (args->Length >= 4 && args[3] != "--json") ? args[3] : nullptr;
+        int rc = DispatchV4::Run(p, args[1], args[2], ref);
+        if (asJson) {
+            // v0.3.17: --json summary. Plan file lives at
+            // <SwarmsDir>/active_<taskId>/plan.json for "supervisor.store"
+            // (the canonical case for this verb).
+            String^ planFile = Path::Combine(p->SwarmsDir, "active_" + args[1], "plan.json");
+            Console::WriteLine("{\"event\":\"dispatch_completed\",\"verb\":\"--dispatch-v4\",\"status\":\"" +
+                (rc == 0 ? "ok" : "error") + "\",\"task_id\":\"" + JsonX::EscapeJson(args[1]) +
+                "\",\"agent\":\"" + JsonX::EscapeJson(args[2]) +
+                "\",\"plan_file\":\"" + JsonX::EscapeJson(planFile) + "\"}");
+        }
+        return rc;
     }
     if (cmd == "--dispatch-master") {
-        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --dispatch-master <objective.md>"); return 2; }
-        return CmdDispatchMaster(p, args[1]);
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --dispatch-master <objective.md> [--json]"); return 2; }
+        bool asJson = false;
+        for (int i = 2; i < args->Length; i++) if (args[i] == "--json") asJson = true;
+        int rc = CmdDispatchMaster(p, args[1]);
+        if (asJson) {
+            String^ swarmId = "master_objective";
+            String^ planFile = Path::Combine(p->SwarmsDir, "active_" + swarmId, "plan.json");
+            Console::WriteLine("{\"event\":\"dispatch_completed\",\"verb\":\"--dispatch-master\",\"status\":\"" +
+                (rc == 0 ? "ok" : "error") + "\",\"objective_file\":\"" + JsonX::EscapeJson(args[1]) +
+                "\",\"swarm_id\":\"" + swarmId + "\",\"plan_file\":\"" + JsonX::EscapeJson(planFile) + "\"}");
+        }
+        return rc;
     }
     if (cmd == "--dispatch-template") {
-        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --dispatch-template <template.json> [--episode-number N] [--task <id>] [--template-var k=v]..."); return 2; }
+        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --dispatch-template <template.json> [--episode-number N] [--task <id>] [--template-var k=v]... [--json]"); return 2; }
         int ep = 1;
         String^ taskId = nullptr;
         List<String^>^ overrides = gcnew List<String^>();
         bool withMemory = false;
+        bool asJson = false;  // v0.3.17: --json summary mode
         for (int i = 2; i < args->Length; i++) {
             String^ a = args[i];
             if (a == "--episode-number" && i + 1 < args->Length) {
@@ -2304,6 +2328,8 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
                 // into the rendered task as the {{memory_slice}} template var.
                 // Pre-v0.3.8 the flag was documented but never wired.
                 withMemory = true;
+            } else if (a == "--json") {
+                asJson = true;
             } else if (a == "--template-var" && i + 1 < args->Length) {
                 overrides->Add(args[i + 1]); i++;
             } else if (a->StartsWith("--template-var=")) {
@@ -2340,7 +2366,26 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
                 ConsoleX::Warn("with-memory: no compiled memory slice for project " + p->ProjectName + " (run --compile-memory first)");
             }
         }
-        return CmdDispatchTemplate(p, args[1], ep, overrides->ToArray(), taskId);
+        int rc = CmdDispatchTemplate(p, args[1], ep, overrides->ToArray(), taskId);
+        if (asJson) {
+            // v0.3.17: --json summary. The taskId may have been auto-
+            // generated by CmdDispatchTemplate if the caller didn't pass
+            // --task. Resolve the swarm id the same way CmdDispatchTemplate
+            // does ("golden_path_<unix_ts>") for the summary.
+            String^ summaryTaskId = taskId;
+            if (String::IsNullOrEmpty(summaryTaskId)) {
+                long ts = (long)(DateTime::UtcNow - DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind::Utc)).TotalSeconds;
+                summaryTaskId = "golden_path_" + ts;
+            }
+            String^ manifestPath = Path::Combine(
+                String::IsNullOrEmpty(p->ProjectName) ? p->DeliverablesDir : p->ProjectDeliverablesDir,
+                ".manifest.json");
+            Console::WriteLine("{\"event\":\"dispatch_completed\",\"verb\":\"--dispatch-template\",\"status\":\"" +
+                (rc == 0 ? "ok" : "error") + "\",\"task_id\":\"" + JsonX::EscapeJson(summaryTaskId) +
+                "\",\"project\":\"" + JsonX::EscapeJson(p->ProjectName) +
+                "\",\"manifest\":\"" + JsonX::EscapeJson(manifestPath) + "\"}");
+        }
+        return rc;
     }
     if (cmd == "--reviewer-patch") {
         // v0.3.13 (G31 flaky fix): expose PatchPlanJsonWithReviewer as a
@@ -2393,11 +2438,25 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         // media-tutorial-video.json uses {{source_markdown}} and
         // cinematic-short.json uses {{source_markdown}} too, so --source
         // is rewritten to --template-var source_markdown=<path>.
-        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --recipe <name> [--source <file> | --source-file <file>] [--task <id>] [--template-var k=v]..."); return 2; }
+        // v0.3.17 (Phase 2b, G69): --json in the forwarded args must still
+        // produce a JSON summary line on the recipe error path (recipe not
+        // found, missing name, etc.). The forwarded --dispatch-template path
+        // would handle this once it runs, but the recipe-name check below
+        // fails before forwarding, so we duplicate the JSON detection here.
+        bool asJson = false;
+        for (int i = 2; i < args->Length; i++) {
+            if (args[i] == "--json") { asJson = true; break; }
+        }
+        if (args->Length < 2) {
+            if (asJson) { Console::WriteLine("{\"event\":\"dispatch_completed\",\"verb\":\"--recipe\",\"status\":\"error\",\"error\":\"missing recipe name\"}"); }
+            else        { ConsoleX::Err("Usage: skill.exe --recipe <name> [--source <file> | --source-file <file>] [--task <id>] [--template-var k=v]..."); }
+            return 2;
+        }
         String^ name = args[1];
         String^ templatePath = Path::Combine(p->TemplatesDir, name + ".json");
         if (!File::Exists(templatePath)) {
-            ConsoleX::Err("Recipe not found: " + templatePath + " (looked in " + p->TemplatesDir + ")");
+            if (asJson) { Console::WriteLine("{\"event\":\"dispatch_completed\",\"verb\":\"--recipe\",\"status\":\"error\",\"error\":\"recipe not found\",\"recipe\":\"" + JsonX::EscapeJson(name) + "\",\"looked_in\":\"" + JsonX::EscapeJson(p->TemplatesDir) + "\"}"); }
+            else        { ConsoleX::Err("Recipe not found: " + templatePath + " (looked in " + p->TemplatesDir + ")"); }
             return 2;
         }
         // Build the forwarded arg array. --source / --source-file are
@@ -2435,10 +2494,21 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         return Vortex::Skill::Run(p->SkillDir, forwarded->ToArray());
     }
     if (cmd == "--package") {
-        if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --package <swarm_id> [--dry-run]"); return 2; }
+        bool asJson = false;
+        if (args->Length < 2) {
+            if (asJson) {
+                Console::WriteLine("{\"error\":\"--package requires a swarm_id\"}");
+            } else {
+                ConsoleX::Err("Usage: skill.exe --package <swarm_id> [--dry-run] [--json]");
+            }
+            return 2;
+        }
         bool dryRun = false;
-        for (int i = 2; i < args->Length; i++) if (args[i] == "--dry-run") dryRun = true;
-        return CmdPackage(p, args[1], dryRun);
+        for (int i = 2; i < args->Length; i++) {
+            if (args[i] == "--dry-run") dryRun = true;
+            else if (args[i] == "--json") asJson = true;
+        }
+        return CmdPackage(p, args[1], dryRun, asJson);
     }
     if (cmd == "--decision-record") {
         // v0.3.11 (Phase 1.1, G46): --json mode emits a structured object

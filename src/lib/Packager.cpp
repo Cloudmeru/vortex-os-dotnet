@@ -36,7 +36,7 @@ namespace Vortex {
         }
     }
 
-    int Packager::Package(Paths^ p, String^ swarmId, bool dryRun) {
+    int Packager::Package(Paths^ p, String^ swarmId, bool dryRun, bool asJson) {
         if (String::IsNullOrEmpty(swarmId)) {
             ConsoleX::Err("Usage: --package <swarm_id> [--dry-run]");
             return ExitCodes::BadInput;
@@ -187,6 +187,30 @@ namespace Vortex {
             Console::WriteLine("  Some files were skipped because they already exist at the target.");
             Console::WriteLine("  This is intentional (refuse-to-overwrite per ADR-015).");
             Console::WriteLine("  To re-package, remove the project folder manually and re-run.");
+        }
+        // v0.3.17: --json summary line. Emitted LAST so consumers can
+        // parse it as the canonical machine-readable result. The text
+        // output above is for humans; the JSON line is for scripts.
+        // Format mirrors the docs/cli-json-contract.md style.
+        if (asJson) {
+            StringBuilder^ json = gcnew StringBuilder();
+            json->Append("{\"event\":\"package_completed\",\"swarm_id\":\"");
+            json->Append(JsonX::EscapeJson(swarmId));
+            json->Append("\",\"project\":\"");
+            json->Append(JsonX::EscapeJson(projectName));
+            json->Append("\",\"status\":\"");
+            json->Append(finalStatus);
+            json->Append("\",\"summary\":{\"copied\":");
+            json->Append(copied);
+            json->Append(",\"skipped\":");
+            json->Append(skipped);
+            json->Append(",\"failed\":");
+            json->Append(failed);
+            json->Append("},\"manifest_path\":\"");
+            String^ manifestPath = Path::Combine(dstDir, ".manifest.json");
+            json->Append(JsonX::EscapeJson(manifestPath));
+            json->Append("\"}");
+            Console::WriteLine(json->ToString());
         }
         return 0;
     }
