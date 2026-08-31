@@ -1243,6 +1243,58 @@ Write-Output '===END==='
         $g29PkgOut -notmatch 'EXISTS, refusing' -and $g29PkgOut -notmatch 'Copy failed'
     }
 
+    # v0.3.15 (G29h): the v0.3.15 packager-fix scenario. Simulates what
+    # CmdDispatchAgentRoster does after a real --dispatch-template:
+    # writes deliverable files directly to <project>/deliverables/ (the
+    # "executor" output), NOT to <swarmDir>/deliverables/. The pre-v0.3.15
+    # packager would miss these files entirely and write an empty manifest.
+    # The fix makes the packager also enumerate <project>/deliverables/
+    # (the "ALREADY_PRESENT" path) so the manifest includes them.
+    $g29hTaskId = "g29h_swarm_$((Get-Date).Ticks)"
+    $g29hSwarmDir = Join-Path $swarmsDir "active_$g29hTaskId"
+    $g29hDelivsDir = Join-Path $g29hSwarmDir 'deliverables'
+    if (-not (Test-Path $g29hDelivsDir)) {
+        New-Item -ItemType Directory -Path $g29hDelivsDir -Force | Out-Null
+    }
+    # Stage the swarm with EMPTY deliverables (mimics Swarm::Spawn's
+    # initial state). The executor (in real life) would write here in
+    # addition to <project>/deliverables/, but for the regression test
+    # we drop the executor's output directly at <project>/deliverables/
+    # to isolate the packager's source-of-truth.
+    $g29hProj = "g29h_executor_$((Get-Date).Ticks)"
+    $env:VORTEX_PROJECT = $g29hProj
+    $g29hProjDelivs = Join-Path $scratchHome "deliverables/$g29hProj"
+    if (-not (Test-Path $g29hProjDelivs)) {
+        New-Item -ItemType Directory -Path $g29hProjDelivs -Force | Out-Null
+    }
+    "executor file 1" | Set-Content -LiteralPath (Join-Path $g29hProjDelivs 'executor_1.md') -Encoding UTF8
+    "executor file 2" | Set-Content -LiteralPath (Join-Path $g29hProjDelivs 'executor_2.png') -Encoding UTF8
+    "executor file 3" | Set-Content -LiteralPath (Join-Path $g29hProjDelivs 'executor_3.json') -Encoding UTF8
+    # Also seed one file in the swarm's deliverables/ to verify both
+    # sources are merged (the v0.3.15 packager reads from both).
+    "swarm file" | Set-Content -LiteralPath (Join-Path $g29hDelivsDir 'swarm_only.md') -Encoding UTF8
+    $g29hPkgOut = & pwsh -NoProfile -File $skillPath --package $g29hTaskId 2>&1 | Out-String
+    $g29hManifest = Join-Path $g29hProjDelivs '.manifest.json'
+    $g29hManifestContent = if (Test-Path $g29hManifest) { Get-Content $g29hManifest -Raw } else { '' }
+    $g29hManifestJson = $null
+    try { $g29hManifestJson = $g29hManifestContent | ConvertFrom-Json } catch {}
+    Check "G29h: --package enumerates executor's files in <project>/deliverables/ (not just swarm's)" {
+        # 4 files: 3 from executor (ALREADY_PRESENT) + 1 from swarm (COPIED)
+        $g29hManifestJson -and $g29hManifestJson.files -is [array] -and
+        $g29hManifestJson.files.Count -eq 4
+    }
+    Check "G29h: --package marks executor's files as ALREADY_PRESENT" {
+        $g29hManifestJson -and
+        ($g29hManifestJson.files | Where-Object { $_.file -eq 'executor_1.md' -and $_.status -eq 'ALREADY_PRESENT' }) -ne $null
+    }
+    Check "G29h: --package marks swarm's files as COPIED (the new src dir was empty before, files were copied)" {
+        $g29hManifestJson -and
+        ($g29hManifestJson.files | Where-Object { $_.file -eq 'swarm_only.md' -and $_.status -eq 'COPIED' }) -ne $null
+    }
+    Check "G29h: --package summary.copied == 4 (3 ALREADY_PRESENT + 1 COPIED, all count as delivered)" {
+        $g29hManifestJson -and $g29hManifestJson.summary.copied -eq 4
+    }
+
     # -----------------------------------------------------------------------
     # G30: --with-memory preserves real newlines in the task file
     # (v0.3.8.1 - bug fix on top of G8). Pre-v0.3.8.1 the --with-memory

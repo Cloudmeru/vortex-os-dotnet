@@ -46,11 +46,17 @@ namespace Vortex {
             ConsoleX::Err("Swarm directory not found: " + swarmDir);
             return ExitCodes::BadInput;
         }
+        // v0.3.15: previously the packager bailed if <swarmDir>/deliverables/
+        // did not exist. After a real --dispatch-template, the executor
+        // (CmdDispatchAgentRoster) writes directly to p->ProjectDeliverablesDir
+        // -- NOT to <swarmDir>/deliverables/ -- so this branch used to
+        // short-circuit with "Swarm has no deliverables/ subdirectory" on
+        // every real dispatch. The fix is to make <swarmDir>/deliverables/
+        // optional: if it exists, enumerate it; if not, fall through to
+        // enumerate p->ProjectDeliverablesDir (the executor's output)
+        // instead. G29h is the regression test.
         String^ srcDir = Path::Combine(swarmDir, "deliverables");
-        if (!Directory::Exists(srcDir)) {
-            ConsoleX::Err("Swarm has no deliverables/ subdirectory: " + srcDir);
-            return ExitCodes::BadInput;
-        }
+        bool swarmDelivsExists = Directory::Exists(srcDir);
         String^ projectName = String::IsNullOrEmpty(p->ProjectName) ? "_unfiled" : p->ProjectName;
         String^ dstDir = String::IsNullOrEmpty(p->ProjectName)
             ? p->DeliverablesDir
@@ -71,15 +77,41 @@ namespace Vortex {
             gcnew array<String^> { swarmId, projectName, dryRun ? "dry-run" : "real" }, 0);
 
         ConsoleX::Banner("VORTEX-OS - Packaging Swarm " + swarmId);
-        Console::WriteLine("  Source:      " + srcDir);
+        Console::WriteLine("  Source:      " + (swarmDelivsExists ? srcDir : dstDir) + (swarmDelivsExists ? "" : "  (executor's output)"));
         Console::WriteLine("  Destination: " + dstDir);
         Console::WriteLine("  Project:     " + projectName + (dryRun ? "  (DRY RUN)" : ""));
         Console::WriteLine();
 
+        // v0.3.15: build the source list. Priority:
+        //   1. <swarmDir>/deliverables/  (legacy: pre-v0.3.15 source)
+        //   2. <project>/deliverables/  (where the executor actually writes)
+        //   3. <VORTEX_HOME>/deliverables/  (unfiled, when no project)
+        // Files are merged + deduped by filename. Skip our own .manifest.json.
+        List<String^>^ allSources = gcnew List<String^>();
+        if (swarmDelivsExists) {
+            for each (String^ f in Directory::GetFiles(srcDir)) {
+                allSources->Add(f);
+            }
+        }
+        if (Directory::Exists(dstDir)) {
+            for each (String^ f in Directory::GetFiles(dstDir)) {
+                String^ name = Path::GetFileName(f);
+                if (name == ".manifest.json") continue;  // skip our own output
+                bool found = false;
+                for each (String^ existing in allSources) {
+                    if (Path::GetFileName(existing) == name) { found = true; break; }
+                }
+                if (!found) allSources->Add(f);
+            }
+        }
+        if (allSources->Count == 0) {
+            ConsoleX::Warn("No source files in either " + srcDir + " or " + dstDir + " -- writing an empty manifest");
+        }
+
         // Plan the copy + collect metadata.
         List<String^>^ manifest = gcnew List<String^>();
         int copied = 0, skipped = 0, failed = 0;
-        array<String^>^ files = Directory::GetFiles(srcDir);
+        array<String^>^ files = allSources->ToArray();
         for each (String ^ src in files) {
             String^ name = Path::GetFileName(src);
             String^ dst  = Path::Combine(dstDir, name);
@@ -87,6 +119,19 @@ namespace Vortex {
             long len = srcInfo->Length;
             String^ sum  = ShortChecksum(src);
 
+            // v0.3.15: the source may be the destination itself (when
+            // the executor already wrote the file to p->ProjectDeliverablesDir).
+            // In that case there's nothing to copy -- just enumerate.
+            // Mark as "ALREADY_PRESENT" so the manifest's summary.copied
+            // correctly counts the executor's deliverables.
+            if (String::Compare(Path::GetFullPath(src), Path::GetFullPath(dst), StringComparison::OrdinalIgnoreCase) == 0) {
+                ConsoleX::Ok("Already present: " + name + "  (" + len + " bytes, " + sum + ")");
+                manifest->Add(String::Format(
+                    "{{ \"file\": \"{0}\", \"status\": \"ALREADY_PRESENT\", \"bytes\": {1}, \"checksum\": \"{2}\" }}",
+                    JsonX::EscapeJson(name), len, sum));
+                copied++;  // counts as "delivered" for accounting
+                continue;
+            }
             if (File::Exists(dst)) {
                 ConsoleX::Fail("EXISTS, refusing to overwrite: " + name);
                 manifest->Add(String::Format(
