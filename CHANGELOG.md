@@ -4,6 +4,164 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.12] — 2026-08-31
+
+### Added — Phase 2a of the cross-OS CLI contract (the 4 streaming verbs)
+
+v0.3.10 + v0.3.11 (Phase 1) shipped `--json` on 23 of the 25 verbs that fit
+a single-line JSON response. v0.3.12 finishes the contract for the
+remaining 4 verbs — the ones that emit a *stream of events* — under a
+sibling contract, `docs/cli-streaming-contract.md`.
+
+The streaming contract uses **NDJSON** (one event per line, no envelope)
+for `--stream`, and the same single-line shape as Phase 1 for the
+other 3 action verbs. Same field-naming, same error envelope, same
+invariant-culture numbers. The only deliberate deviation from Phase 1
+is the per-line event shape for `--stream`.
+
+### New `--json` verbs (4)
+
+| Verb | `--json` shape | Notes |
+|---|---|---|
+| `--stream <task_id> --json` | **NDJSON** (one event per line) | 7 event types: `stream_started`, `partial_ready`, `hint_recorded`, `audit`, `progress`, `stream_completed`, `stream_failed`. |
+| `--stream-stop <task_id> --json` | single object | `{stopped, task_id, stopped_at}` |
+| `--stream-finalize <task_id> --json` | single object | `{finalized, task_id, status, deliverables, moved_to?}` |
+| `--hint <task_id> --text "..." --json` | single object | `{hint_recorded, task_id, index, ts}` |
+
+After this version, **27 of the 35 verbs** support `--json`. The
+remaining 8 (dispatch verbs + recipe/package) are deferred to a future
+"summary JSON mode" because they emit many files per call — they don't
+fit either the single-line or NDJSON shape cleanly. See the
+streaming contract doc §8 for the open questions on v0.3.13+.
+
+### Engine behavior changes (text mode unchanged)
+
+- **`--stream <task_id> --json` is a 250ms poll loop.** The watcher
+  reads `state/in_progress/<taskId>/` and `memory/audit.jsonl` and
+  emits an event for every new partial, hint, or audit entry that
+  references this `task_id`. The loop terminates on `.completed`,
+  `.failed`, or disappearance of the in_progress dir. Exit code is
+  0 on `stream_completed`, 1 on `stream_failed`. The text mode
+  (default) is unchanged from v0.2.2 — it just prints the current
+  state and exits, as it always has.
+- **Initial state is pre-emitted.** When `--stream` attaches, it
+  emits `stream_started` followed by `partial_ready` for every
+  existing `.partial*` file and `hint_recorded` for every existing
+  line in `.hints.jsonl`. The consumer sees the current state, not
+  just changes from this point on.
+- **Text mode bypass.** The skill's `Vortex.Streamer.psm1` rich
+  presenter (FileSystemWatcher + interactive y/n/q prompt) is
+  bypassed when `--json` is set. The engine's NDJSON path goes
+  directly to stdout, so a CI step or Python consumer can read the
+  stream without parsing the rich presenter's text output. The
+  `skill.ps1` short-circuit at line 452 honors
+  `-not ($Arguments -contains '--json')` (already in place from
+  v0.3.11.2).
+
+### Build + MSVC fixes (this release)
+
+- **`System.Threading.Thread` reference assembly added to `/FU`.**
+  The new poll loop calls `System::Threading::Thread::Sleep(250)`,
+  which lives in `System.Threading.Thread.dll` (not the bundled
+  `System.Threading.dll`). Without the new `/FU` line, MSVC errors
+  with C3465 ("must reference the assembly 'System.Threading.Thread'").
+  Linux/GCC did not catch this because it auto-discovers the
+  forwarder. `src/build.ps1` now /FUs both.
+- **Audit-tail reader rewritten to use a byte buffer.** The
+  initial implementation used `StreamReader(FileStream^)` to read
+  the tail of `audit.jsonl`. MSVC errored C2668 ("ambiguous call")
+  because the `StreamReader(Stream^)` and
+  `StreamReader(Stream^, Encoding^, bool, int, bool)` overloads are
+  both viable for a 1-arg call. Replaced with a direct
+  `FileStream::Read` into a `cli::array<unsigned char>^` + a single
+  `Encoding::UTF8->GetString(buf, 0, read)` call. Side benefit:
+  one fewer intermediate string allocation per poll cycle.
+- **4× `(int)` casts on `JsonX::GetLong` results.** MSVC's
+  `StringBuilder::Append(long)` is ambiguous (32-bit `long` vs
+  `__int64` vs `int`). Same fix pattern as v0.3.11.1's
+  CmdBudgetSet/Show/StreamList. Sites: the 4 `GetLong` callers in
+  the new NDJSON event emitters.
+
+### New tests (G58-G65)
+
+36 sub-checks locking the new contract:
+
+- G58 (5 sub-checks): `--stream-stop --json` success path is a
+  single line with `{stopped, task_id, stopped_at}` and round-trips
+  the task id.
+- G59 (3 sub-checks): `--stream-stop --json` with no in-progress
+  dir returns `{error, path}` on the same stdout stream.
+- G60 (6 sub-checks): `--stream-finalize --json` returns
+  `{finalized, task_id, status, deliverables}` and round-trips the
+  task id.
+- G61 (6 sub-checks): `--hint --json` returns
+  `{hint_recorded, task_id, index, ts}` with the right types.
+- G62 (5 sub-checks): `--stream --json` is NDJSON — emits at least
+  one event, first event is `stream_started`, includes a
+  `partial_ready`, terminates with `stream_completed`, exit code 0.
+  Uses a background `Start-Process` + 1500ms timer to drop
+  `.completed` so the watcher terminates within the test budget.
+- G63 (3 sub-checks): `stream_started` event has `task_id`,
+  `started_at` (int), and `agent` fields.
+- G64 (4 sub-checks): `partial_ready` event has `deliverable`,
+  `path`, `bytes` (int), `produced_at` (int).
+- G65 (4 sub-checks): `--stream --json` with no in-progress dir
+  returns `{error, path}` as a single line (not NDJSON for errors).
+
+### Acceptance
+
+- 36/36 G58-G65 sub-checks pass on the full Phase 2a contract.
+- 346/346 G1-G65 sub-checks pass on the full test suite (G31 still
+  flaky; passes when the media-stack dispatch completes within its
+  test budget, fails on slow Windows runs).
+- Build: `Vortex.dll` 176 KB (up from 173.6 KB at v0.3.11.1).
+- The 2.4 KB growth is the new NDJSON event emitters + the audit-
+  tail reader.
+
+## [0.3.11.2] — 2026-08-30
+
+### Fixed — 3 "out of scope" Phase 1 contract violations
+
+v0.3.11.1 closed 3 contract gaps + 2 test fixes, but the post-merge
+audit surfaced 3 more issues that the original Phase 1 work had
+deferred as "out of scope for the engine". v0.3.11.2 closes all 3.
+A contract that doesn't work end-to-end through the documented
+entry point isn't a contract.
+
+- **`Commands::AgentsValidate` required-field list aligned with
+  the linter.** Pre-v0.3.11.2 the engine required
+  `name+version+kind+entry`, but no shipped agent manifest has an
+  `entry` field. `--agents-validate` always returned `ok=false` on
+  a valid manifest. The linter (`--agents-lint`) uses
+  `name+version+kind+reads+writes`. v0.3.11.2 unifies both to the
+  linter's set: `{name, version, kind, reads, writes}`. G48d now
+  validates the real shipped `supervisor.store.json` manifest.
+- **`skill.ps1` --audit-trail short-circuit now honors `--json`.**
+  Pre-v0.3.11.2 the rich audit viewer at `skill.ps1:371` always
+  fired when `--audit-trail` was passed, even with `--json`. The
+  viewer's output is multi-line pretty-printed, not the
+  contract's single-line shape. v0.3.11.2 adds
+  `-not ($Arguments -contains '--json')` to the short-circuit
+  guard, mirroring the one already in place at line 509. G54 now
+  exercises the engine's `--audit-trail --json` end-to-end through
+  the operator-facing entry point.
+- **`skill.ps1` --stream / --stream-stop / --stream-list / --hint
+  short-circuits now honor `--json`.** Same pattern: the streamer
+  short-circuit at `skill.ps1:451` always fired, stripping `--json`
+  before re-invoking the engine. v0.3.11.2 adds the same
+  `-not (... --json)` guard. G37 (`--stream-list --json`) now goes
+  through the engine's JSON path. (The Phase 2a release
+  v0.3.12 adds `--stream --json` itself, so the short-circuit fix
+  was the prerequisite.)
+
+### Acceptance
+
+- 310/310 G1-G57 sub-checks pass (no regression vs the v0.3.11.1
+  baseline).
+- 0 known pre-existing failures at this version (G29 race condition
+  is still present but did not fire on the Windows dev box during
+  the 310/310 run; tracked as a v0.3.13+ fix).
+
 ## [0.3.11.1] — 2026-08-30
 
 ### Fixed — Windows MSVC build + single-line JSON contract + Phase 1 audit gaps
