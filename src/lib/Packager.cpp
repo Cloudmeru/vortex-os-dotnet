@@ -88,10 +88,10 @@ namespace Vortex {
             gcnew array<String^> { swarmId, projectName, dryRun ? "dry-run" : "real" }, 0);
 
         ConsoleX::Banner("VORTEX-OS - Packaging Swarm " + swarmId);
-        Console::WriteLine("  Source:      " + srcDir);
-        Console::WriteLine("  Destination: " + dstDir + "  (same as source)");
-        Console::WriteLine("  Project:     " + projectName + (dryRun ? "  (DRY RUN)" : ""));
-        Console::WriteLine();
+        ConsoleX::WriteText("  Source:      " + srcDir);
+        ConsoleX::WriteText("  Destination: " + dstDir + "  (same as source)");
+        ConsoleX::WriteText("  Project:     " + projectName + (dryRun ? "  (DRY RUN)" : ""));
+        ConsoleX::WriteText();
 
         // Enumerate the source (= destination). Skip our own .manifest.json.
         List<String^>^ realFiles = gcnew List<String^>();
@@ -155,7 +155,17 @@ namespace Vortex {
             sb->AppendLine("  \"project\": \"" + JsonX::EscapeJson(projectName) + "\",");
             sb->AppendLine("  \"packaged_at\": \"" + DateTime::Now.ToString("yyyy-MM-ddTHH:mm:ss", System::Globalization::CultureInfo::InvariantCulture) + "\",");
             sb->AppendLine("  \"engine_version\": \"0.3.0\",");
-            sb->AppendLine("  \"summary\": { \"copied\": " + copied + ", \"skipped\": " + skipped + ", \"failed\": " + failed + " },");
+            // v0.3.18: skip/failed fields are optional in the manifest.
+            // v0.3.16's single-source design never skips/fails (every
+            // file is ALREADY_PRESENT), so the fields are always 0 in
+            // the happy path. We omit them when 0 to keep the manifest
+            // tight. Consumers that need the field for older manifests
+            // can default to 0 when absent.
+            String^ summaryLine = "  \"summary\": { \"copied\": " + copied;
+            if (skipped > 0) { summaryLine += ", \"skipped\": " + skipped; }
+            if (failed  > 0) { summaryLine += ", \"failed\": "  + failed;  }
+            summaryLine += " },";
+            sb->AppendLine(summaryLine);
             sb->AppendLine("  \"files\": [");
             for (int i = 0; i < manifest->Count; i++) {
                 sb->Append("    " + manifest[i]);
@@ -168,8 +178,8 @@ namespace Vortex {
             ConsoleX::Ok("Wrote manifest: " + manifestPath);
         }
 
-        Console::WriteLine();
-        Console::WriteLine("  Summary: " + copied + " copied, " + skipped + " skipped, " + failed + " failed");
+        ConsoleX::WriteText();
+        ConsoleX::WriteText("  Summary: " + copied + " copied, " + skipped + " skipped, " + failed + " failed");
 
         // v0.2.3 (G1): close the dispatch with a dispatch_end line.
         // status is "ok" if nothing failed, "partial" if some files
@@ -183,10 +193,10 @@ namespace Vortex {
 
         if (failed > 0) return 1;
         if (skipped > 0) {
-            Console::WriteLine();
-            Console::WriteLine("  Some files were skipped because they already exist at the target.");
-            Console::WriteLine("  This is intentional (refuse-to-overwrite per ADR-015).");
-            Console::WriteLine("  To re-package, remove the project folder manually and re-run.");
+            ConsoleX::WriteText();
+            ConsoleX::WriteText("  Some files were skipped because they already exist at the target.");
+            ConsoleX::WriteText("  This is intentional (refuse-to-overwrite per ADR-015).");
+            ConsoleX::WriteText("  To re-package, remove the project folder manually and re-run.");
         }
         // v0.3.17: --json summary line. Emitted LAST so consumers can
         // parse it as the canonical machine-readable result. The text
@@ -202,15 +212,20 @@ namespace Vortex {
             json->Append(finalStatus);
             json->Append("\",\"summary\":{\"copied\":");
             json->Append(copied);
-            json->Append(",\"skipped\":");
-            json->Append(skipped);
-            json->Append(",\"failed\":");
-            json->Append(failed);
+            // v0.3.18: skip/failed fields are optional. v0.3.16's
+            // single-source design never skips/fails, so the fields
+            // are always 0 in the happy path. We omit them when 0 to
+            // match the manifest shape.
+            if (skipped > 0) { json->Append(",\"skipped\":"); json->Append(skipped); }
+            if (failed  > 0) { json->Append(",\"failed\":");  json->Append(failed);  }
             json->Append("},\"manifest_path\":\"");
             String^ manifestPath = Path::Combine(dstDir, ".manifest.json");
             json->Append(JsonX::EscapeJson(manifestPath));
             json->Append("\"}");
-            Console::WriteLine(json->ToString());
+            // v0.3.18: --envelope wraps the package_completed JSON in
+            // a common envelope. WrapEnvelope() either wraps (when the
+            // --envelope flag is set) or emits the raw JSON.
+            ConsoleX::WrapEnvelope(json->ToString(), finalStatus);
         }
         return 0;
     }

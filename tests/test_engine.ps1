@@ -149,7 +149,17 @@ try {
     Check "manifest.project is pkg_test" { $manifest.project -eq 'pkg_test' }
     Check "manifest.engine_version is 0.3.0" { $manifest.engine_version -eq '0.3.0' }
     Check "manifest.summary.copied is 3" { $manifest.summary.copied -eq 3 }
-    Check "manifest.summary.skipped is 0" { $manifest.summary.skipped -eq 0 }
+    # v0.3.18: summary.skipped/failed are now optional in the manifest
+    # (omitted when 0). v0.3.16's single-source design never skips/fails,
+    # so the field is absent in the happy path. Either state is valid.
+    Check "manifest.summary.skipped is absent-or-0 (v0.3.18 optional)" {
+        (-not $manifest.summary.PSObject.Properties['skipped']) -or
+        ($manifest.summary.skipped -eq 0)
+    }
+    Check "manifest.summary.failed is absent-or-0 (v0.3.18 optional)" {
+        (-not $manifest.summary.PSObject.Properties['failed']) -or
+        ($manifest.summary.failed -eq 0)
+    }
     Check "manifest.files has 3 entries" { $manifest.files.Count -eq 3 }
     Check "all files have status ALREADY_PRESENT" {
         ($manifest.files | ForEach-Object { $_.status } | Sort-Object -Unique) -join ',' -eq 'ALREADY_PRESENT'
@@ -174,9 +184,18 @@ try {
         -not (Compare-Object $firstManifest.files $secondManifest.files -Property file,status,bytes,checksum)
     }
     Check "packager is idempotent (second run has same summary)" {
+        # v0.3.18: skipped/failed are optional (omitted when 0). Both runs
+        # should have the same field set -- either both present with the
+        # same value, or both absent.
+        $firstHasSkipped = $firstManifest.summary.PSObject.Properties['skipped']
+        $secondHasSkipped = $secondManifest.summary.PSObject.Properties['skipped']
+        $firstHasFailed = $firstManifest.summary.PSObject.Properties['failed']
+        $secondHasFailed = $secondManifest.summary.PSObject.Properties['failed']
         $firstManifest.summary.copied -eq $secondManifest.summary.copied -and
-        $firstManifest.summary.skipped -eq $secondManifest.summary.skipped -and
-        $firstManifest.summary.failed -eq $secondManifest.summary.failed
+        ($firstHasSkipped -eq $secondHasSkipped) -and
+        ($firstHasFailed -eq $secondHasFailed) -and
+        (-not $firstHasSkipped -or $firstManifest.summary.skipped -eq $secondManifest.summary.skipped) -and
+        (-not $firstHasFailed  -or $firstManifest.summary.failed  -eq $secondManifest.summary.failed)
     }
 
     # -----------------------------------------------------------------------
@@ -2424,6 +2443,186 @@ Write-Output '===END==='
     $g70Line = Get-VortexSummaryLine $g70Out
     Check "G70: --dispatch-template --json emits a summary line (error path)" {
         $g70Line -ne $null
+    }
+
+    # -----------------------------------------------------------------------
+    # G71: --package --json + .manifest.json omit summary.skipped/failed
+    # when they're 0 (v0.3.18 optional fields).
+    #
+    # v0.3.16's single-source design never skips or fails (every file is
+    # ALREADY_PRESENT), so these fields are always 0 in the happy path.
+    # The packager now omits them when 0 to keep both the manifest and
+    # the --json summary line tight. Consumers that need the field for
+    # older manifests can default to 0 when absent.
+    # -----------------------------------------------------------------------
+    $g71Swarm = "g71_swarm_$((Get-Date).Ticks)"
+    $g71SwarmDir = Join-Path $swarmsDir "active_$g71Swarm"
+    if (-not (Test-Path $g71SwarmDir)) { New-Item -ItemType Directory -Path $g71SwarmDir -Force | Out-Null }
+    $g71Proj = "g71_proj_$((Get-Date).Ticks)"
+    $env:VORTEX_PROJECT = $g71Proj
+    $g71ProjDir = Join-Path $scratchHome "deliverables/$g71Proj"
+    if (-not (Test-Path $g71ProjDir)) { New-Item -ItemType Directory -Path $g71ProjDir -Force | Out-Null }
+    "g71 file 1" | Set-Content -LiteralPath (Join-Path $g71ProjDir 'g71_a.md') -Encoding UTF8
+    "g71 file 2" | Set-Content -LiteralPath (Join-Path $g71ProjDir 'g71_b.md') -Encoding UTF8
+    $g71Out = & pwsh -NoProfile -File $skillPath --package $g71Swarm --json 2>&1
+    $g71Line = Get-VortexSummaryLine $g71Out
+    $g71Json = $null
+    if ($g71Line) { try { $g71Json = $g71Line | ConvertFrom-Json } catch {} }
+    $g71ManifestPath = Join-Path $g71ProjDir '.manifest.json'
+    $g71Manifest = $null
+    if (Test-Path $g71ManifestPath) {
+        try { $g71Manifest = Get-Content $g71ManifestPath -Raw | ConvertFrom-Json } catch {}
+    }
+    Check "G71: --package --json summary omits skipped when 0" {
+        $g71Json -and $g71Json.summary.PSObject.Properties['copied'] -and
+        -not $g71Json.summary.PSObject.Properties['skipped']
+    }
+    Check "G71: --package --json summary omits failed when 0" {
+        $g71Json -and $g71Json.summary.PSObject.Properties['copied'] -and
+        -not $g71Json.summary.PSObject.Properties['failed']
+    }
+    Check "G71: --package --json summary still has copied (always present)" {
+        $g71Json -and $g71Json.summary.PSObject.Properties['copied'] -and
+        $g71Json.summary.copied -eq 2
+    }
+    Check "G71: .manifest.json omits summary.skipped when 0" {
+        $g71Manifest -and
+        -not $g71Manifest.summary.PSObject.Properties['skipped']
+    }
+    Check "G71: .manifest.json omits summary.failed when 0" {
+        $g71Manifest -and
+        -not $g71Manifest.summary.PSObject.Properties['failed']
+    }
+    Check "G71: .manifest.json still has summary.copied (always present)" {
+        $g71Manifest -and $g71Manifest.summary.copied -eq 2
+    }
+
+    # -----------------------------------------------------------------------
+    # G72: --json-only suppresses ConsoleX::* and ConsoleX::WriteText output
+    # (v0.3.18 text suppression). The JSON line is still emitted (via
+    # Console::WriteLine directly). The flag is a stronger version of
+    # --json: it implies JSON output AND suppresses the text banners.
+    # -----------------------------------------------------------------------
+    $g72Swarm = "g72_swarm_$((Get-Date).Ticks)"
+    $g72SwarmDir = Join-Path $swarmsDir "active_$g72Swarm"
+    if (-not (Test-Path $g72SwarmDir)) { New-Item -ItemType Directory -Path $g72SwarmDir -Force | Out-Null }
+    $g72Proj = "g72_proj_$((Get-Date).Ticks)"
+    $env:VORTEX_PROJECT = $g72Proj
+    $g72ProjDir = Join-Path $scratchHome "deliverables/$g72Proj"
+    if (-not (Test-Path $g72ProjDir)) { New-Item -ItemType Directory -Path $g72ProjDir -Force | Out-Null }
+    "g72 file" | Set-Content -LiteralPath (Join-Path $g72ProjDir 'g72.md') -Encoding UTF8
+
+    # --json mode: text + JSON
+    $g72JsonOut = & pwsh -NoProfile -File $skillPath --package $g72Swarm --json 2>&1
+    $g72JsonEngineLines = @($g72JsonOut | Where-Object { $_ -notmatch '^\[vortex-os\]' })
+    $g72JsonJsonLines = @($g72JsonOut | Where-Object { $_.Trim().StartsWith('{') -and $_.Trim().EndsWith('}') })
+    Check "G72: --package --json emits both text and JSON" {
+        # Use a fresh swarm so the test doesn't depend on packager
+        # idempotency state from earlier G4/G29 tests in the suite.
+        $g72BothSwarm = "g72_both_$((Get-Date).Ticks)"
+        $g72BothSwarmDir = Join-Path $swarmsDir "active_$g72BothSwarm"
+        New-Item -ItemType Directory -Path $g72BothSwarmDir -Force | Out-Null
+        $g72BothOut = & pwsh -NoProfile -File $skillPath --package $g72BothSwarm --json 2>&1
+        $g72BothEng = @($g72BothOut | Where-Object { $_ -notmatch '^\[vortex-os\]' }).Count
+        $g72BothEng -gt $g72JsonEngineLines.Count
+    }
+
+    # --json-only mode: JSON only, text suppressed
+    $g72Swarm2 = "g72_swarm2_$((Get-Date).Ticks)"
+    $g72Swarm2Dir = Join-Path $swarmsDir "active_$g72Swarm2"
+    New-Item -ItemType Directory -Path $g72Swarm2Dir -Force | Out-Null
+    $g72OnlyOut = & pwsh -NoProfile -File $skillPath --package $g72Swarm2 --json-only 2>&1
+    $g72OnlyEngineLines = @($g72OnlyOut | Where-Object { $_ -notmatch '^\[vortex-os\]' })
+    $g72OnlyJsonLines = @($g72OnlyOut | Where-Object { $_.Trim().StartsWith('{') -and $_.Trim().EndsWith('}') })
+    Check "G72: --package --json-only emits only the JSON line" {
+        # The skill wrapper emits [vortex-os] lines; filter those.
+        # Of the engine's output, expect exactly 1 line (the JSON summary).
+        $g72OnlyEngineLines.Count -eq 1
+    }
+    Check "G72: --package --json-only still emits a valid JSON summary line" {
+        $g72OnlyJsonLines.Count -eq 1 -and
+        ($g72OnlyJsonLines[0] | ConvertFrom-Json).event -eq 'package_completed'
+    }
+    Check "G72: --json-only suppresses the Summary: text line" {
+        # The text "Summary: X copied, Y skipped, Z failed" should NOT
+        # appear in --json-only mode.
+        $g72OnlyEngineLines -notmatch 'Summary:'
+    }
+    Check "G72: --json-only suppresses the Packaged: text lines" {
+        $g72OnlyEngineLines -notmatch 'Packaged:'
+    }
+
+    # -----------------------------------------------------------------------
+    # G73: --envelope wraps dispatch JSON in a common envelope
+    # (v0.3.18 unified result envelope). The 5 dispatch verbs
+    # (--package, --dispatch-v4, --dispatch-master, --dispatch-template,
+    # --recipe) get the wrapper; other --json modes (--decision-record,
+    # --cost-report, etc.) are NOT wrapped in v0.3.18 and keep their
+    # v0.3.10-v0.3.17 shapes. The wrapper is opt-in (default off,
+    # backward compat).
+    # -----------------------------------------------------------------------
+    $g73Swarm = "g73_swarm_$((Get-Date).Ticks)"
+    $g73SwarmDir = Join-Path $swarmsDir "active_$g73Swarm"
+    New-Item -ItemType Directory -Path $g73SwarmDir -Force | Out-Null
+    $g73Proj = "g73_proj_$((Get-Date).Ticks)"
+    $env:VORTEX_PROJECT = $g73Proj
+    $g73ProjDir = Join-Path $scratchHome "deliverables/$g73Proj"
+    if (-not (Test-Path $g73ProjDir)) { New-Item -ItemType Directory -Path $g73ProjDir -Force | Out-Null }
+    "g73 file" | Set-Content -LiteralPath (Join-Path $g73ProjDir 'g73.md') -Encoding UTF8
+
+    # --package --json (no envelope): old shape
+    $g73OutRaw = & pwsh -NoProfile -File $skillPath --package $g73Swarm --json 2>&1
+    $g73LineRaw = Get-VortexSummaryLine $g73OutRaw
+    $g73JsonRaw = $null
+    if ($g73LineRaw) { try { $g73JsonRaw = $g73LineRaw | ConvertFrom-Json } catch {} }
+    Check "G73: --package --json (no envelope) keeps the v0.3.17 raw shape" {
+        $g73JsonRaw -and $g73JsonRaw.PSObject.Properties['event'] -and
+        $g73JsonRaw.event -eq 'package_completed' -and
+        -not $g73JsonRaw.PSObject.Properties['vortex_version']
+    }
+
+    # --package --json --envelope: new wrapped shape
+    $g73Swarm2 = "g73_swarm2_$((Get-Date).Ticks)"
+    $g73Swarm2Dir = Join-Path $swarmsDir "active_$g73Swarm2"
+    New-Item -ItemType Directory -Path $g73Swarm2Dir -Force | Out-Null
+    $g73OutEnv = & pwsh -NoProfile -File $skillPath --package $g73Swarm2 --json --envelope 2>&1
+    $g73LineEnv = Get-VortexSummaryLine $g73OutEnv
+    $g73JsonEnv = $null
+    if ($g73LineEnv) { try { $g73JsonEnv = $g73LineEnv | ConvertFrom-Json } catch {} }
+    Check "G73: --package --json --envelope wraps in vortex_version+ts+verb+status+result" {
+        $g73JsonEnv -and
+        $g73JsonEnv.PSObject.Properties['vortex_version'] -and
+        $g73JsonEnv.PSObject.Properties['ts'] -and
+        $g73JsonEnv.PSObject.Properties['verb'] -and
+        $g73JsonEnv.PSObject.Properties['status'] -and
+        $g73JsonEnv.PSObject.Properties['result']
+    }
+    Check "G73: envelope verb matches the dispatched command" {
+        $g73JsonEnv -and $g73JsonEnv.verb -eq '--package'
+    }
+    Check "G73: envelope status matches the inner status" {
+        $g73JsonEnv -and $g73JsonEnv.status -eq $g73JsonEnv.result.status
+    }
+    Check "G73: envelope result preserves the inner event=package_completed" {
+        $g73JsonEnv -and $g73JsonEnv.result.event -eq 'package_completed'
+    }
+    Check "G73: envelope ts is a recent Unix epoch (within 60s of now)" {
+        # PowerShell's ConvertFrom-Json may parse a long long as int32,
+        # int64, or decimal depending on magnitude. Accept any numeric type.
+        $g73JsonEnv -and $g73JsonEnv.PSObject.Properties['ts'] -and
+        ($g73JsonEnv.ts -is [int] -or $g73JsonEnv.ts -is [long] -or $g73JsonEnv.ts -is [decimal]) -and
+        [Math]::Abs([double]$g73JsonEnv.ts - [double][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) -lt 60
+    }
+
+    # --recipe --json --envelope: error path also gets the envelope
+    $g73OutRec = & pwsh -NoProfile -File $skillPath --recipe nonexistent-recipe --json --envelope 2>&1
+    $g73LineRec = Get-VortexSummaryLine $g73OutRec
+    $g73JsonRec = $null
+    if ($g73LineRec) { try { $g73JsonRec = $g73LineRec | ConvertFrom-Json } catch {} }
+    Check "G73: --recipe --json --envelope wraps the error path too" {
+        $g73JsonRec -and $g73JsonRec.status -eq 'error' -and
+        $g73JsonRec.verb -eq '--recipe' -and
+        $g73JsonRec.result.error -match 'recipe not found'
     }
 
     # -----------------------------------------------------------------------

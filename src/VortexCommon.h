@@ -25,6 +25,12 @@ using namespace System::Globalization;
 
 namespace Vortex {
 
+    // v0.3.18: a single source of truth for the engine version string.
+    // Pre-v0.3.18 the string "0.3.0" was hardcoded in 5+ places. The
+    // envelope wrapper needs the version; the dispatcher banner and
+    // --version output also need it. Bump this on every release.
+    #define ENGINE_VERSION_STRING "0.3.18"
+
     // -------------------------------------------------------------------------
     // JSON helpers — thin wrappers around System.Text.Json
     // -------------------------------------------------------------------------
@@ -326,11 +332,47 @@ namespace Vortex {
     // -------------------------------------------------------------------------
     public ref class ConsoleX abstract sealed {
     public:
+        // v0.3.18: --json-only flag. When true, ALL ConsoleX::* helpers
+        // and ConsoleX::WriteText are silent. The JSON emit blocks use
+        // Console::WriteLine directly (bypassing this flag) so the JSON
+        // output is still emitted. Set by Dispatch() when --json-only
+        // is parsed. Default false (text mode).
+        static property bool JsonOnly {
+            bool get() { return s_jsonOnly; }
+            void set(bool v) { s_jsonOnly = v; }
+        }
+
+        // v0.3.18: --envelope flag. When true, the 5 dispatch verbs
+        // (--package, --dispatch-v4, --dispatch-master, --dispatch-template,
+        // --recipe) wrap their JSON summary line in a common envelope:
+        //   {"vortex_version":"...","ts":N,"verb":"...","status":"...","result":{...}}
+        // Set by Dispatch() when --envelope is parsed. Default false
+        // (no wrapping, backward compat with v0.3.10-v0.3.17 shapes).
+        // The other 27 --json modes (--decision-record, --cost-report,
+        // --agents-trace, etc.) are NOT wrapped in v0.3.18; a future
+        // commit will roll the envelope into all 32 modes.
+        static property bool Envelope {
+            bool get() { return s_envelope; }
+            void set(bool v) { s_envelope = v; }
+        }
+        // Dispatch() calls this once at the start of each verb to
+        // record the command name (e.g. "--package"). The envelope
+        // wrapper uses this as the "verb" field.
+        static void SetCurrentVerb(String^ v) { s_currentVerb = v == nullptr ? "" : v; }
+    private:
+        static bool s_jsonOnly = false;
+        static bool s_envelope = false;
+        static String^ s_currentVerb = "";
+    public:
         static void Err(String^ msg) {
+            // v0.3.18: --json-only suppresses even ERROR lines (the
+            // dispatcher emits a JSON error line on the same path).
+            if (s_jsonOnly) return;
             Console::Error->WriteLine("ERROR: " + msg);
         }
 
         static void Warn(String^ msg) {
+            if (s_jsonOnly) return;
             ConsoleColor prev = Console::ForegroundColor;
             Console::ForegroundColor = ConsoleColor::Yellow;
             Console::WriteLine("  ⚠ " + msg);
@@ -338,14 +380,17 @@ namespace Vortex {
         }
 
         static void Ok(String^ msg) {
+            if (s_jsonOnly) return;
             Console::WriteLine("  ✓ " + msg);
         }
 
         static void Fail(String^ msg) {
+            if (s_jsonOnly) return;
             Console::WriteLine("  ✗ " + msg);
         }
 
         static void Step(String^ msg) {
+            if (s_jsonOnly) return;
             ConsoleColor prev = Console::ForegroundColor;
             Console::ForegroundColor = ConsoleColor::Cyan;
             Console::Write("▶ ");
@@ -355,12 +400,70 @@ namespace Vortex {
         }
 
         static void Banner(String^ title) {
+            if (s_jsonOnly) return;
             ConsoleColor prev = Console::ForegroundColor;
             Console::ForegroundColor = ConsoleColor::Cyan;
             Console::WriteLine("═══════════════════════════════════════════════════════");
             Console::WriteLine("  " + title);
             Console::WriteLine("═══════════════════════════════════════════════════════");
             Console::ForegroundColor = prev;
+        }
+
+        // v0.3.18: --json-only text sink. Code paths that previously
+        // called Console::WriteLine for human-readable text output
+        // (audit tables, plugin lists, dispatch banners, etc.) call
+        // WriteText instead. WriteText honors JsonOnly; Console::WriteLine
+        // does NOT (so the JSON emit blocks keep using Console::WriteLine
+        // to always emit the JSON).
+        static void WriteText(String^ msg) {
+            if (s_jsonOnly) return;
+            Console::WriteLine(msg);
+        }
+        static void WriteText(String^ format, ... array<Object^>^ args) {
+            if (s_jsonOnly) return;
+            Console::WriteLine(format, args);
+        }
+        static void WriteText() {
+            if (s_jsonOnly) return;
+            Console::WriteLine();
+        }
+        static void Write(String^ msg) {
+            if (s_jsonOnly) return;
+            Console::Write(msg);
+        }
+        static void Write(String^ format, ... array<Object^>^ args) {
+            if (s_jsonOnly) return;
+            Console::Write(format, args);
+        }
+
+        // v0.3.18: --envelope wrapper. Takes a raw JSON object string
+        // (e.g. {"event":"package_completed",...}) and emits it as the
+        // "result" field of a common envelope, OR emits the raw JSON
+        // unchanged if envelope mode is off. The status is a short
+        // string ("ok" | "error" | "partial" | "failed") that callers
+        // compute at the emit site.
+        static void WrapEnvelope(String^ jsonObj, String^ status) {
+            if (!s_envelope) {
+                Console::WriteLine(jsonObj);
+                return;
+            }
+            // Compute Unix-epoch seconds. DateTime(1970,1,1) is the
+            // .NET epoch; subtract to get TimeSpan, take TotalSeconds.
+            DateTime epoch(1970, 1, 1, 0, 0, 0, DateTimeKind::Utc);
+            long long unixSec = (long long)(DateTime::UtcNow - epoch).TotalSeconds;
+            StringBuilder^ sb = gcnew StringBuilder();
+            sb->Append("{\"vortex_version\":\"");
+            sb->Append(JsonX::EscapeJson(ENGINE_VERSION_STRING));
+            sb->Append("\",\"ts\":");
+            sb->Append(unixSec);
+            sb->Append(",\"verb\":\"");
+            sb->Append(JsonX::EscapeJson(s_currentVerb));
+            sb->Append("\",\"status\":\"");
+            sb->Append(JsonX::EscapeJson(status == nullptr ? "" : status));
+            sb->Append("\",\"result\":");
+            sb->Append(jsonObj);
+            sb->Append("}");
+            Console::WriteLine(sb->ToString());
         }
     };
 

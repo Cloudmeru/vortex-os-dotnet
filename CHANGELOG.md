@@ -4,6 +4,142 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.18] — 2026-08-31
+
+### Added — Deferred items from the v0.3.17 Phase 2b review
+
+Three deferred items from the v0.3.17 release are now in. None are
+breaking changes; all are opt-in flags that default to the v0.3.17
+behavior.
+
+#### `--json-only` — text suppression in JSON mode
+
+The v0.3.17 "summary line at the end" pattern emits both the text
+banners/logs AND the JSON line. Some consumers (CI steps, Python
+scripts piping stdout to `json.loads`) want only the JSON. v0.3.18
+adds `--json-only`, which suppresses all `ConsoleX::*` helpers and
+141 `Console::WriteLine` text-output calls across `skill.cpp` and
+the `lib/*.cpp` files. The JSON line is still emitted (via direct
+`Console::WriteLine` calls in the JSON emit blocks, which bypass
+the filter).
+
+`--json-only` is a strict superset of `--json`: it implies JSON
+output AND suppresses text. So `--package X --json-only` and
+`--package X --json --json-only` are equivalent.
+
+Test results: `--package --json` emits ~23 lines of text + JSON;
+`--package --json-only` emits 1 line (the JSON). G72: 5/5.
+
+#### `--envelope` — unified result envelope for dispatch verbs
+
+The 5 dispatch verbs (`--package`, `--dispatch-v4`, `--dispatch-master`,
+`--dispatch-template`, `--recipe`) now have an optional common
+envelope wrapper. When `--envelope` is set, the JSON line is wrapped:
+
+```json
+{"vortex_version":"0.3.18","ts":1725134000,"verb":"--package","status":"ok","result":{"event":"package_completed","swarm_id":"...","project":"...","status":"ok","summary":{"copied":2},"manifest_path":"..."}}
+```
+
+The `result` field contains the v0.3.17 inner shape unchanged. The
+`vortex_version` / `ts` / `verb` / `status` fields are the common
+envelope metadata. Consumers that want the inner shape only can
+read `$.result.event` instead of `$.event`.
+
+**Scope:** v0.3.18 wraps the 5 dispatch verbs only. The other
+27 `--json` modes (`--decision-record`, `--cost-report`,
+`--agents-trace`, etc.) keep their v0.3.10-v0.3.17 shapes in
+v0.3.18. Extending `--envelope` to all 32 modes is a future
+commit.
+
+G73: 7/7.
+
+#### Optional `summary.skipped` / `summary.failed` fields in the manifest
+
+v0.3.16's single-source packager never skips or fails a file
+(every file is `ALREADY_PRESENT` in the destination). The
+`summary.skipped` and `summary.failed` fields in the
+`.manifest.json` (and the `--json` summary line) are always 0
+in the happy path. v0.3.18 omits them when 0 to keep the
+manifest and summary line tight.
+
+Consumers that read these fields should default to 0 when absent.
+This is a non-breaking change for `summary.copied` (always
+present) and a minor breaking change for `summary.skipped` /
+`summary.failed` (now optional).
+
+G71: 6/6.
+
+### Added — `ENGINE_VERSION_STRING` macro
+
+The engine version string "0.3.0" was hardcoded in 5+ places
+(version banner, `--version` output, manifest `engine_version`
+field, etc.). v0.3.18 introduces a single `#define` in
+`VortexCommon.h`:
+
+```cpp
+#define ENGINE_VERSION_STRING "0.3.18"
+```
+
+The `--envelope` wrapper uses this for the `vortex_version`
+field. The banner and `--version` should be migrated in a
+follow-up commit (still hardcoded as "0.3.0" in v0.3.18
+to keep this release focused).
+
+### Design doc
+
+`docs/cli-json-contract-v2.md` is a DRAFT proposal for the
+v1.0.0 contract: JSON by default, `--text` for humans, the
+envelope is always on, the v0.3.18 building blocks become
+the default shape. The doc covers the migration path,
+the breaking changes, the timeline, and the success-or-rollback
+criteria. **Nothing in the doc is implemented** — it's a
+design proposal for the next major version.
+
+### Files
+
+- `src/VortexCommon.h` (+`#define ENGINE_VERSION_STRING`, +`JsonOnly`
+  property, +`Envelope` property, +`SetCurrentVerb()`, +`WrapEnvelope()`,
+  +`WriteText()` / `Write()` helpers, modified `Err/Warn/Ok/Fail/Step/Banner`
+  to honor `JsonOnly`)
+- `src/skill.cpp` (Dispatch: parse `--json-only` + `--envelope` flags;
+  SetCurrentVerb; per-verb `--json` checks now also accept `--json-only`;
+  5 dispatch verb JSON emits wrapped in `ConsoleX::WrapEnvelope`;
+  141 `Console::WriteLine` text calls → `ConsoleX::WriteText`)
+- `src/lib/Packager.cpp` (optional fields in manifest + `--json` summary
+  line; package_completed emit wrapped in `ConsoleX::WrapEnvelope`;
+  10 `Console::WriteLine` text calls → `ConsoleX::WriteText`)
+- `tests/test_engine.ps1` (+G71 6 sub-checks, +G72 5 sub-checks, +G73
+  7 sub-checks, updated G4 + G5 idempotency tests to handle optional
+  fields)
+- `docs/cli-json-contract-v2.md` (new, design proposal for v1.0.0)
+
+### Build artifact
+
+Vortex.dll 180.5 KB (was 179 KB at v0.3.17, +1.5 KB for the
+envelope wrapper, the ConsoleX::WriteText variadic overload, the
+JSON-detection logic in the recipe handler, and the optional-fields
+branch in Packager).
+
+### Test results
+
+- **396/396 PASS** (was 373/373 at v0.3.17, +18 G71-G73 sub-checks
+  + 5 idempotency sub-checks updated for optional fields, 0 regressions
+  on the 373 v0.3.17 tests).
+- G71 (6/6): optional fields
+- G72 (5/5): text suppression
+- G73 (7/7): unified envelope
+
+### Backward compat
+
+- Default mode (no `--json`) is unchanged for all 35 verbs.
+- `--json` mode is unchanged for all 35 verbs (the v0.3.17
+  inner shape is preserved inside the v0.3.18 envelope when
+  `--envelope` is set).
+- `summary.copied` is always present in the manifest.
+- `summary.skipped` / `summary.failed` are now optional (omitted
+  when 0). Consumers that read these as always-present should
+  default to 0.
+
 ## [0.3.17] — 2026-08-31
 
 ### Added — Dispatch summary JSON mode (Phase 2b, G66–G70)

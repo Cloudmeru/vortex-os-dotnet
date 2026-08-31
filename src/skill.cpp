@@ -44,12 +44,12 @@ static int CmdDispatchMaster(Paths^ p, String^ objectiveFile) {
         ConsoleX::Err("Master objective file not found: " + objectiveFile);
         return ExitCodes::BadInput;
     }
-    Console::WriteLine();
+    ConsoleX::WriteText();
     ConsoleX::Banner("VORTEX-OS — Submitting Master Objective");
-    Console::WriteLine("  File: " + objectiveFile);
-    Console::WriteLine();
-    Console::WriteLine("  T0 General Manager → T1 Store Supervisor");
-    Console::WriteLine();
+    ConsoleX::WriteText("  File: " + objectiveFile);
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("  T0 General Manager → T1 Store Supervisor");
+    ConsoleX::WriteText();
     return DispatchV4::Run(p, "master_objective", "supervisor.store", objectiveFile);
 }
 
@@ -74,11 +74,11 @@ static int CmdDispatchTemplate(Paths^ p, String^ templateFile, int episodeNumber
         ConsoleX::Err("Usage: skill.exe --dispatch-template <template.json> [--episode-number N] [--template-var k=v]...");
         return ExitCodes::BadInput;
     }
-    Console::WriteLine();
+    ConsoleX::WriteText();
     ConsoleX::Banner("VORTEX-OS - Replaying Golden Path Template");
-    Console::WriteLine("  Template: " + templateFile);
-    if (episodeNumber >= 1) Console::WriteLine("  Episode:  " + episodeNumber);
-    Console::WriteLine();
+    ConsoleX::WriteText("  Template: " + templateFile);
+    if (episodeNumber >= 1) ConsoleX::WriteText("  Episode:  " + episodeNumber);
+    ConsoleX::WriteText();
     // v0.3.5: validate the template's agent_roster (if present) so the
     // operator gets a clear error if a named agent's manifest is missing
     // or malformed BEFORE the dispatch actually starts.
@@ -106,7 +106,7 @@ static int CmdDispatchTemplate(Paths^ p, String^ templateFile, int episodeNumber
     } catch (Exception^ ex) {
         ConsoleX::Warn("Template validation skipped: " + ex->Message);
     }
-    Console::WriteLine();
+    ConsoleX::WriteText();
     int rc = Template::Run(p, templateFile, episodeNumber, overrides, taskId);
     if (rc != 0) return rc;
     // v0.3.7 (G1+G2+G3+G4): after Template::Run writes the rendered
@@ -474,7 +474,7 @@ static int CmdPackage(Paths^ p, String^ swarmId, bool dryRun, bool asJson) {
                     // it manually with the printed line.
                     String^ reviewerManifest = Path::Combine(p->AgentsDir, reviewer + ".json");
                     if (File::Exists(reviewerManifest)) {
-                        Console::WriteLine("REVIEWER_INVOKE: --plugin-test " + reviewer + " (the engine will auto-invoke this in a future release)");
+                        ConsoleX::WriteText("REVIEWER_INVOKE: --plugin-test " + reviewer + " (the engine will auto-invoke this in a future release)");
                     } else {
                         ConsoleX::Warn("Reviewer named '" + reviewer + "' but no manifest at " + reviewerManifest);
                     }
@@ -750,11 +750,11 @@ static int CmdHitlStatus(Paths^ p, bool asJson) {
         return 0;
     }
     if (items->Count == 0) {
-        Console::WriteLine("  No pending HITL requests.");
+        ConsoleX::WriteText("  No pending HITL requests.");
     } else {
         for each (auto t in items) {
-            Console::WriteLine("  ⏸  " + t->Item1);
-            Console::WriteLine("      {\"task_id\":\"" + t->Item1 +
+            ConsoleX::WriteText("  ⏸  " + t->Item1);
+            ConsoleX::WriteText("      {\"task_id\":\"" + t->Item1 +
                 "\",\"status\":\"" + t->Item2 +
                 "\",\"severity\":\"" + t->Item3 +
                 "\",\"proposed_action\":\"" + t->Item4 + "\"}");
@@ -913,7 +913,7 @@ static int CmdHitlDeny(Paths^ p, String^ taskId, bool asJson) {
             Console::WriteLine(body);
         }
     } else {
-        Console::WriteLine("  ✗ Denied: " + taskId);
+        ConsoleX::WriteText("  ✗ Denied: " + taskId);
     }
     return 0;
 }
@@ -995,7 +995,7 @@ static int CmdAuditTrail(Paths^ p, bool asJson) {
         Console::WriteLine(sb->ToString());
         return 0;
     }
-    Console::WriteLine("  Audit trail (last 50 entries):");
+    ConsoleX::WriteText("  Audit trail (last 50 entries):");
     int start2 = Math::Max(0, lines->Length - 50);
     for (int i = start2; i < lines->Length; i++) {
         try {
@@ -1006,9 +1006,9 @@ static int CmdAuditTrail(Paths^ p, bool asJson) {
             String^ agent  = JsonX::GetStrOr(root, "agent",  "");
             String^ action = JsonX::GetStrOr(root, "action", "");
             String^ status = JsonX::GetStrOr(root, "status", "");
-            Console::WriteLine(String::Format("  {0}  {1}  {2}  {3}  {4}", ts, tier, agent, action, status));
+            ConsoleX::WriteText(String::Format("  {0}  {1}  {2}  {3}  {4}", ts, tier, agent, action, status));
         } catch (Exception^) {
-            Console::WriteLine("  " + lines[i]);
+            ConsoleX::WriteText("  " + lines[i]);
         }
     }
     return 0;
@@ -1051,7 +1051,7 @@ static int CmdVersion() {
             }
         }
     } catch (Exception^) {}
-    Console::WriteLine("VORTEX-OS Vortex.dll " + version + " (C++/CLI on PowerShell 7+, .NET 10)");
+    ConsoleX::WriteText("VORTEX-OS Vortex.dll " + version + " (C++/CLI on PowerShell 7+, .NET 10)");
     return 0;
 }
 
@@ -1094,16 +1094,16 @@ static int CmdPluginsList(Paths^ p, bool asJson) {
         sb->Append("}");
         Console::WriteLine(sb->ToString());
     } else {
-        Console::WriteLine("  {0,-22}  {1,-10}  {2,-14}  {3}", "name", "version", "capability", "source");
-        Console::WriteLine("  ----------------------  ----------  --------------  ------");
+        ConsoleX::WriteText("  {0,-22}  {1,-10}  {2,-14}  {3}", "name", "version", "capability", "source");
+        ConsoleX::WriteText("  ----------------------  ----------  --------------  ------");
         for each (String^ row in plugins) {
             array<String^>^ parts = row->Split('\t');
             if (parts->Length < 4) continue;
             String^ source = parts[3]->Contains(p->HomeDir) ? "user" : "skill";
-            Console::WriteLine("  {0,-22}  {1,-10}  {2,-14}  {3}", parts[0], parts[1], parts[2], source);
+            ConsoleX::WriteText("  {0,-22}  {1,-10}  {2,-14}  {3}", parts[0], parts[1], parts[2], source);
         }
-        Console::WriteLine("");
-        Console::WriteLine("  Total: {0} plugin(s)", plugins->Count);
+        ConsoleX::WriteText("");
+        ConsoleX::WriteText("  Total: {0} plugin(s)", plugins->Count);
     }
     return 0;
 }
@@ -1167,7 +1167,7 @@ static int CmdPluginTest(Paths^ p, String^ name, String^ inJson, int timeoutS) {
         opts->WriteIndented = true;
         Console::WriteLine(JsonSerializer::Serialize(outDoc->RootElement, opts));
     } catch (Exception^) {
-        Console::WriteLine(output);
+        ConsoleX::WriteText(output);
     }
     return 0;
 }
@@ -1501,8 +1501,8 @@ static int CmdTeamConfig(Paths^ p, bool asJson) {
 
     // Text mode (unchanged)
     if (!configExists) {
-        Console::WriteLine("  (no .vortex/config.json; team mode is off -- default single-user mode)");
-        Console::WriteLine("  Run skill\\setup-team.ps1 to enable team mode.");
+        ConsoleX::WriteText("  (no .vortex/config.json; team mode is off -- default single-user mode)");
+        ConsoleX::WriteText("  Run skill\\setup-team.ps1 to enable team mode.");
         return 0;
     }
     JsonSerializerOptions^ opts = gcnew JsonSerializerOptions();
@@ -1511,13 +1511,13 @@ static int CmdTeamConfig(Paths^ p, bool asJson) {
 
     // Also print the resolved Paths values so the operator can see how
     // ApplyTeamConfig mutated them.
-    Console::WriteLine("");
-    Console::WriteLine("  Resolved Paths (after ApplyTeamConfig):");
-    Console::WriteLine("    StateDir:           " + p->StateDir);
-    Console::WriteLine("    PendingApprovalsDir:" + p->PendingApprovalsDir);
-    Console::WriteLine("    AuditLogFile:       " + p->AuditLogFile);
-    Console::WriteLine("    TasksDir:           " + p->TasksDir);
-    Console::WriteLine("    InProgressDir:      " + p->InProgressDir);
+    ConsoleX::WriteText("");
+    ConsoleX::WriteText("  Resolved Paths (after ApplyTeamConfig):");
+    ConsoleX::WriteText("    StateDir:           " + p->StateDir);
+    ConsoleX::WriteText("    PendingApprovalsDir:" + p->PendingApprovalsDir);
+    ConsoleX::WriteText("    AuditLogFile:       " + p->AuditLogFile);
+    ConsoleX::WriteText("    TasksDir:           " + p->TasksDir);
+    ConsoleX::WriteText("    InProgressDir:      " + p->InProgressDir);
     return 0;
 }
 
@@ -1579,8 +1579,8 @@ static int CmdStreamList(Paths^ p, bool asJson) {
         return 0;
     }
     // Text mode (unchanged)
-    Console::WriteLine("  {0,-22}  {1,-12}  {2}", "task_id", "started", "partials");
-    Console::WriteLine("  ----------------------  ------------  --------");
+    ConsoleX::WriteText("  {0,-22}  {1,-12}  {2}", "task_id", "started", "partials");
+    ConsoleX::WriteText("  ----------------------  ------------  --------");
     for each (String^ taskId in tasks) {
         String^ dir = Path::Combine(p->InProgressDir, taskId);
         String^ startedAt = "";
@@ -1602,13 +1602,13 @@ static int CmdStreamList(Paths^ p, bool asJson) {
                 if (Path::GetFileName(f)->Contains(".partial")) partials++;
             }
         } catch (Exception^) {}
-        Console::WriteLine("  {0,-22}  {1,-12}  {2}", taskId, startedAt, partials);
+        ConsoleX::WriteText("  {0,-22}  {1,-12}  {2}", taskId, startedAt, partials);
     }
-    Console::WriteLine("");
-    Console::WriteLine("  Total: {0} in-progress dispatch(es)", tasks->Count);
+    ConsoleX::WriteText("");
+    ConsoleX::WriteText("  Total: {0} in-progress dispatch(es)", tasks->Count);
     // Print the in_progress dir so the operator knows where to find the
     // .partial files (and so the test harness can assert the path).
-    Console::WriteLine("  in_progress: {0}", p->InProgressDir);
+    ConsoleX::WriteText("  in_progress: {0}", p->InProgressDir);
     return 0;
 }
 
@@ -1713,8 +1713,8 @@ static int CmdStream(Paths^ p, String^ taskId, bool autoOpen, bool asJson) {
         } catch (Exception^) {}
         EmitStreamEvent(p, taskId, "stream_started", extra, nullptr);
     } else {
-        Console::WriteLine("  [stream] attached to " + taskId);
-        Console::WriteLine("  In-progress: " + dir);
+        ConsoleX::WriteText("  [stream] attached to " + taskId);
+        ConsoleX::WriteText("  In-progress: " + dir);
     }
 
     // Pre-emit the existing partials so the consumer sees the current
@@ -2089,103 +2089,103 @@ static int CmdStreamFinalize(Paths^ p, String^ taskId, bool asJson) {
 
 // Print the help/usage banner
 static int CmdHelp() {
-    Console::WriteLine();
-    Console::WriteLine("  ╔══════════════════════════════════════════════════════╗");
-    Console::WriteLine("  ║  VORTEX-OS — Autonomous Multi-Agent Command Center   ║");
-    Console::WriteLine("  ╚══════════════════════════════════════════════════════╝");
-    Console::WriteLine();
-    Console::WriteLine("USAGE:");
-    Console::WriteLine("  skill.exe <command> [args]");
-    Console::WriteLine("  skill.exe --version             Print version and exit");
-    Console::WriteLine();
-    Console::WriteLine("GLOBAL FLAGS:");
-    Console::WriteLine("  --json                         Emit a JSON object instead of human-readable");
-    Console::WriteLine("                                text. Supported by 27 of the 35 verbs (see");
-    Console::WriteLine("                                docs/cli-json-contract.md and");
-    Console::WriteLine("                                docs/cli-streaming-contract.md for the per-verb");
-    Console::WriteLine("                                shape). The 4 streaming verbs");
-    Console::WriteLine("                                (--stream, --stream-stop, --stream-finalize,");
-    Console::WriteLine("                                --hint) emit NDJSON: one event per line.");
-    Console::WriteLine();
-    Console::WriteLine("DISCOVERY & INSPECTION:");
-    Console::WriteLine("  --agents-discover              List all available agents");
-    Console::WriteLine("  --agents-inspect <name>        Dump a single agent's manifest");
-    Console::WriteLine("  --agents-validate <file>       Validate an agent manifest");
-    Console::WriteLine("  --agents-lint [--all|<name>]   Lint agents against the 8 invariants");
-    Console::WriteLine("  --agents-graph [--format]      Print the agent graph");
-    Console::WriteLine();
-    Console::WriteLine("DISPATCH (the 4-tier chain of command):");
-    Console::WriteLine("  --dispatch-master <objective.md>      Submit to T0 General Manager");
-    Console::WriteLine("  --dispatch-template <template.json>   Replay a saved Golden Path");
-    Console::WriteLine("       [--episode-number N] [--task <id>] [--template-var k=v]...");
-    Console::WriteLine("       [--protagonist=...] [--antagonist=...] [--setting=...]");
-    Console::WriteLine("  --dispatch-v4 <task_id> <agent>       Direct V4 pipeline dispatch");
-    Console::WriteLine();
-    Console::WriteLine("MAINTENANCE (operator-only escape hatches; not part of the regular flow):");
-    Console::WriteLine("  --reviewer-patch <template.json> <swarm_id>");
-    Console::WriteLine("       Re-apply the reviewer-gate patch to an existing plan.json.");
-    Console::WriteLine("       Useful when an operator has hand-edited plan.json or when");
-    Console::WriteLine("       the dispatcher is run against a template without going through");
-    Console::WriteLine("       the full --dispatch-template flow. Test entry point for G31.");
-    Console::WriteLine();
-    Console::WriteLine("PACKAGING (collect swarm deliverables into project dir):");
-    Console::WriteLine("  --package <swarm_id> [--dry-run]      Copy + write .manifest.json");
-    Console::WriteLine();
-    Console::WriteLine("HITL (Human-in-the-Loop / Deep-Sleep Safety Gate):");
-    Console::WriteLine("  --hitl-status                  List pending approval requests");
-    Console::WriteLine("  --hitl-approve <task_id>       Approve a pending request");
-    Console::WriteLine("  --hitl-deny <task_id>          Deny a pending request");
-    Console::WriteLine();
-    Console::WriteLine("DECISION HISTORY (operator-driven branching across episodes):");
-    Console::WriteLine("  --decision-record --task <id> --gate <name> --choice <text>");
-    Console::WriteLine("       [--severity HIGH|CRITICAL|LOW] [--reason <text>] [--episode N]");
-    Console::WriteLine("  --decision-list                 Print the decision history table");
-    Console::WriteLine();
-    Console::WriteLine("INSPECTION:");
-    Console::WriteLine("  --inspector-check <task_id>    Run Continuity Engine check");
-    Console::WriteLine("  --audit-trail                  Print the audit log");
-    Console::WriteLine();
-    Console::WriteLine("PLUGINS (v0.2.0+):");
-    Console::WriteLine("  --plugins-list                 List all discovered plugins");
-    Console::WriteLine("  --plugins-info <name>          Dump a plugin's manifest as JSON");
-    Console::WriteLine("  --plugin-test <name>           Run a plugin with --input <json>");
-    Console::WriteLine("       [--input <json>] [--timeout-s N]");
-    Console::WriteLine("  --plugin-remove <name>         Remove a user-scope plugin");
-    Console::WriteLine("  --plugin-install <url>         Install a plugin from a GitHub URL");
-    Console::WriteLine();
-    Console::WriteLine("TEAM MODE (v0.2.2+):");
-    Console::WriteLine("  --team-config                  Print the active .vortex/config.json + resolved paths");
-    Console::WriteLine();
-    Console::WriteLine("STREAMING (v0.2.2+):");
-    Console::WriteLine("  --stream-list                  List in-progress dispatches");
-    Console::WriteLine("  --stream <task_id>             Attach to an in-progress dispatch (--auto-open to skip prompt)");
-    Console::WriteLine("  --stream-stop <task_id>        Stop watching a dispatch (it continues in background)");
-    Console::WriteLine("  --hint <task_id> --text <text> Send an operator hint to the next dispatch in the chain");
-    Console::WriteLine("  --stream-finalize <task_id>    Manually move .partial files to deliverables/");
-    Console::WriteLine();
-    Console::WriteLine("MEMORY (v0.3.0+, PRD-17):");
-    Console::WriteLine("  --compile-memory [--project S | --series N | --operator]");
-    Console::WriteLine("                                Recompute the cross-project memory store at");
-    Console::WriteLine("                                $VORTEX_HOME/memory/derived/ from the audit + cost logs.");
-    Console::WriteLine("  --memory-show [project_slug]   Print the Prior projects context slice that");
-    Console::WriteLine("                                --with-memory would inject into the next dispatch.");
-    Console::WriteLine();
-    Console::WriteLine("TESTING:");
-    Console::WriteLine("  verify.ps1                     Run the full post-upload verification");
-    Console::WriteLine();
-    Console::WriteLine("EXAMPLES:");
-    Console::WriteLine("  skill.ps1 --agents-discover");
-    Console::WriteLine("  skill.ps1 --agents-lint --all");
-    Console::WriteLine("  skill.ps1 --dispatch-master my_project\\objective.md");
-    Console::WriteLine("  skill.ps1 --dispatch-template templates\\episode_pattern.json \\");
-    Console::WriteLine("                  --episode-number 2 --protagonist=\"Eira Vance\" \\");
-    Console::WriteLine("                  --antagonist=\"Director Hale\" --setting=\"Solstice Bay\"");
-    Console::WriteLine("  skill.ps1 --package active_golden_path_1700000000");
-    Console::WriteLine("  skill.ps1 --hitl-status");
-    Console::WriteLine("  skill.ps1 --hitl-approve package_websim");
-    Console::WriteLine("  skill.ps1 --decision-list");
-    Console::WriteLine("  skill.ps1 --audit-trail");
-    Console::WriteLine();
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("  ╔══════════════════════════════════════════════════════╗");
+    ConsoleX::WriteText("  ║  VORTEX-OS — Autonomous Multi-Agent Command Center   ║");
+    ConsoleX::WriteText("  ╚══════════════════════════════════════════════════════╝");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("USAGE:");
+    ConsoleX::WriteText("  skill.exe <command> [args]");
+    ConsoleX::WriteText("  skill.exe --version             Print version and exit");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("GLOBAL FLAGS:");
+    ConsoleX::WriteText("  --json                         Emit a JSON object instead of human-readable");
+    ConsoleX::WriteText("                                text. Supported by 27 of the 35 verbs (see");
+    ConsoleX::WriteText("                                docs/cli-json-contract.md and");
+    ConsoleX::WriteText("                                docs/cli-streaming-contract.md for the per-verb");
+    ConsoleX::WriteText("                                shape). The 4 streaming verbs");
+    ConsoleX::WriteText("                                (--stream, --stream-stop, --stream-finalize,");
+    ConsoleX::WriteText("                                --hint) emit NDJSON: one event per line.");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("DISCOVERY & INSPECTION:");
+    ConsoleX::WriteText("  --agents-discover              List all available agents");
+    ConsoleX::WriteText("  --agents-inspect <name>        Dump a single agent's manifest");
+    ConsoleX::WriteText("  --agents-validate <file>       Validate an agent manifest");
+    ConsoleX::WriteText("  --agents-lint [--all|<name>]   Lint agents against the 8 invariants");
+    ConsoleX::WriteText("  --agents-graph [--format]      Print the agent graph");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("DISPATCH (the 4-tier chain of command):");
+    ConsoleX::WriteText("  --dispatch-master <objective.md>      Submit to T0 General Manager");
+    ConsoleX::WriteText("  --dispatch-template <template.json>   Replay a saved Golden Path");
+    ConsoleX::WriteText("       [--episode-number N] [--task <id>] [--template-var k=v]...");
+    ConsoleX::WriteText("       [--protagonist=...] [--antagonist=...] [--setting=...]");
+    ConsoleX::WriteText("  --dispatch-v4 <task_id> <agent>       Direct V4 pipeline dispatch");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("MAINTENANCE (operator-only escape hatches; not part of the regular flow):");
+    ConsoleX::WriteText("  --reviewer-patch <template.json> <swarm_id>");
+    ConsoleX::WriteText("       Re-apply the reviewer-gate patch to an existing plan.json.");
+    ConsoleX::WriteText("       Useful when an operator has hand-edited plan.json or when");
+    ConsoleX::WriteText("       the dispatcher is run against a template without going through");
+    ConsoleX::WriteText("       the full --dispatch-template flow. Test entry point for G31.");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("PACKAGING (collect swarm deliverables into project dir):");
+    ConsoleX::WriteText("  --package <swarm_id> [--dry-run]      Copy + write .manifest.json");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("HITL (Human-in-the-Loop / Deep-Sleep Safety Gate):");
+    ConsoleX::WriteText("  --hitl-status                  List pending approval requests");
+    ConsoleX::WriteText("  --hitl-approve <task_id>       Approve a pending request");
+    ConsoleX::WriteText("  --hitl-deny <task_id>          Deny a pending request");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("DECISION HISTORY (operator-driven branching across episodes):");
+    ConsoleX::WriteText("  --decision-record --task <id> --gate <name> --choice <text>");
+    ConsoleX::WriteText("       [--severity HIGH|CRITICAL|LOW] [--reason <text>] [--episode N]");
+    ConsoleX::WriteText("  --decision-list                 Print the decision history table");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("INSPECTION:");
+    ConsoleX::WriteText("  --inspector-check <task_id>    Run Continuity Engine check");
+    ConsoleX::WriteText("  --audit-trail                  Print the audit log");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("PLUGINS (v0.2.0+):");
+    ConsoleX::WriteText("  --plugins-list                 List all discovered plugins");
+    ConsoleX::WriteText("  --plugins-info <name>          Dump a plugin's manifest as JSON");
+    ConsoleX::WriteText("  --plugin-test <name>           Run a plugin with --input <json>");
+    ConsoleX::WriteText("       [--input <json>] [--timeout-s N]");
+    ConsoleX::WriteText("  --plugin-remove <name>         Remove a user-scope plugin");
+    ConsoleX::WriteText("  --plugin-install <url>         Install a plugin from a GitHub URL");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("TEAM MODE (v0.2.2+):");
+    ConsoleX::WriteText("  --team-config                  Print the active .vortex/config.json + resolved paths");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("STREAMING (v0.2.2+):");
+    ConsoleX::WriteText("  --stream-list                  List in-progress dispatches");
+    ConsoleX::WriteText("  --stream <task_id>             Attach to an in-progress dispatch (--auto-open to skip prompt)");
+    ConsoleX::WriteText("  --stream-stop <task_id>        Stop watching a dispatch (it continues in background)");
+    ConsoleX::WriteText("  --hint <task_id> --text <text> Send an operator hint to the next dispatch in the chain");
+    ConsoleX::WriteText("  --stream-finalize <task_id>    Manually move .partial files to deliverables/");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("MEMORY (v0.3.0+, PRD-17):");
+    ConsoleX::WriteText("  --compile-memory [--project S | --series N | --operator]");
+    ConsoleX::WriteText("                                Recompute the cross-project memory store at");
+    ConsoleX::WriteText("                                $VORTEX_HOME/memory/derived/ from the audit + cost logs.");
+    ConsoleX::WriteText("  --memory-show [project_slug]   Print the Prior projects context slice that");
+    ConsoleX::WriteText("                                --with-memory would inject into the next dispatch.");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("TESTING:");
+    ConsoleX::WriteText("  verify.ps1                     Run the full post-upload verification");
+    ConsoleX::WriteText();
+    ConsoleX::WriteText("EXAMPLES:");
+    ConsoleX::WriteText("  skill.ps1 --agents-discover");
+    ConsoleX::WriteText("  skill.ps1 --agents-lint --all");
+    ConsoleX::WriteText("  skill.ps1 --dispatch-master my_project\\objective.md");
+    ConsoleX::WriteText("  skill.ps1 --dispatch-template templates\\episode_pattern.json \\");
+    ConsoleX::WriteText("                  --episode-number 2 --protagonist=\"Eira Vance\" \\");
+    ConsoleX::WriteText("                  --antagonist=\"Director Hale\" --setting=\"Solstice Bay\"");
+    ConsoleX::WriteText("  skill.ps1 --package active_golden_path_1700000000");
+    ConsoleX::WriteText("  skill.ps1 --hitl-status");
+    ConsoleX::WriteText("  skill.ps1 --hitl-approve package_websim");
+    ConsoleX::WriteText("  skill.ps1 --decision-list");
+    ConsoleX::WriteText("  skill.ps1 --audit-trail");
+    ConsoleX::WriteText();
     return 0;
 }
 
@@ -2202,7 +2202,32 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         return CmdHelp();
     }
 
+    // v0.3.18: --json-only is a global flag. When set, all ConsoleX::*
+    // helpers and ConsoleX::WriteText/Write are silent. The JSON emit
+    // blocks (using Console::WriteLine directly) are NOT affected, so
+    // consumers still receive the JSON line. The flag is positional
+    // (anywhere on the command line) and must be parsed before the
+    // per-verb --json parsers to ensure the ConsoleX helpers respect
+    // it for that verb's run.
+    for (int i = 0; i < args->Length; i++) {
+        if (args[i] == "--json-only") { ConsoleX::JsonOnly = true; break; }
+    }
+
+    // v0.3.18: --envelope is a global flag. When set, the 5 dispatch
+    // verbs wrap their JSON summary line in a common envelope. The flag
+    // is positional and must be parsed before Dispatch() calls into the
+    // verb-specific logic. Default false (no wrapping, backward compat
+    // with v0.3.10-v0.3.17 shapes).
+    for (int i = 0; i < args->Length; i++) {
+        if (args[i] == "--envelope") { ConsoleX::Envelope = true; break; }
+    }
+
     String^ cmd = args[0];
+
+    // v0.3.18: set the current verb so the envelope wrapper knows which
+    // command produced the JSON line. Set ONCE per Dispatch call, not
+    // per emit (the verb doesn't change inside a single dispatch).
+    ConsoleX::SetCurrentVerb(cmd);
 
     // Discovery & inspection --------------------------------------------------
     if (cmd == "--agents-discover") {
@@ -2210,7 +2235,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         List<String^>^ extra = gcnew List<String^>();
         for (int i = 1; i < args->Length; i++) {
             if (args[i] == "--include-deprecated") incDep = true;
-            else if (args[i] == "--json")          outJson = true;
+            else if (args[i] == "--json" || args[i] == "--json-only")          outJson = true;
             else extra->Add(args[i]);
         }
         return Commands::AgentsDiscover(p, incDep, outJson, extra->ToArray());
@@ -2218,7 +2243,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--agents-inspect") {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; break; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; break; }
         }
         if (!asJson && args->Length < 2) { Console::WriteLine("Usage: --agents-inspect <name>"); return 1; }
         String^ name = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
@@ -2227,7 +2252,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--agents-validate") {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; break; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; break; }
         }
         if (!asJson && args->Length < 2) { Console::WriteLine("Usage: --agents-validate <file>"); return 1; }
         String^ file = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
@@ -2237,7 +2262,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         bool asJson = false;
         String^ target = "--all";
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; }
             else if (target == "--all" && !args[i]->StartsWith("--")) { target = args[i]; }
         }
         return Commands::AgentsLint(p, target, asJson);
@@ -2247,14 +2272,14 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
             if (args[i] == "--format" && i + 1 < args->Length) { fmt = args[i + 1]; i++; }
-            else if (args[i] == "--json") { asJson = true; }
+            else if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; }
         }
         return Commands::AgentsGraph(p, fmt, asJson);
     }
     if (cmd == "--agents-trace") {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; break; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; break; }
         }
         if (!asJson && args->Length < 2) { Console::WriteLine("Usage: --agents-trace <run_id>"); return 1; }
         String^ runId = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
@@ -2268,7 +2293,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         // no-op (CmdHelp). This batch closes the gap.
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; break; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; break; }
         }
         if (!asJson && args->Length < 2) { Console::WriteLine("Usage: --agents-factory-diff <name>"); return 1; }
         String^ name = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
@@ -2279,7 +2304,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--dispatch-v4") {
         if (args->Length < 3) { ConsoleX::Err("Usage: skill.exe --dispatch-v4 <task_id> <agent> [objective_ref]"); return 2; }
         bool asJson = false;
-        for (int i = 3; i < args->Length; i++) if (args[i] == "--json") asJson = true;
+        for (int i = 3; i < args->Length; i++) if (args[i] == "--json" || args[i] == "--json-only") asJson = true;
         String^ ref = (args->Length >= 4 && args[3] != "--json") ? args[3] : nullptr;
         int rc = DispatchV4::Run(p, args[1], args[2], ref);
         if (asJson) {
@@ -2287,24 +2312,31 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
             // <SwarmsDir>/active_<taskId>/plan.json for "supervisor.store"
             // (the canonical case for this verb).
             String^ planFile = Path::Combine(p->SwarmsDir, "active_" + args[1], "plan.json");
-            Console::WriteLine("{\"event\":\"dispatch_completed\",\"verb\":\"--dispatch-v4\",\"status\":\"" +
-                (rc == 0 ? "ok" : "error") + "\",\"task_id\":\"" + JsonX::EscapeJson(args[1]) +
+            String^ status = (rc == 0 ? "ok" : "error");
+            // v0.3.18: --envelope wraps the JSON in a common envelope.
+            // Build the inner object once, then let WrapEnvelope decide
+            // whether to wrap or emit raw.
+            String^ inner = "{\"event\":\"dispatch_completed\",\"verb\":\"--dispatch-v4\",\"status\":\"" + status +
+                "\",\"task_id\":\"" + JsonX::EscapeJson(args[1]) +
                 "\",\"agent\":\"" + JsonX::EscapeJson(args[2]) +
-                "\",\"plan_file\":\"" + JsonX::EscapeJson(planFile) + "\"}");
+                "\",\"plan_file\":\"" + JsonX::EscapeJson(planFile) + "\"}";
+            ConsoleX::WrapEnvelope(inner, status);
         }
         return rc;
     }
     if (cmd == "--dispatch-master") {
         if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --dispatch-master <objective.md> [--json]"); return 2; }
         bool asJson = false;
-        for (int i = 2; i < args->Length; i++) if (args[i] == "--json") asJson = true;
+        for (int i = 2; i < args->Length; i++) if (args[i] == "--json" || args[i] == "--json-only") asJson = true;
         int rc = CmdDispatchMaster(p, args[1]);
         if (asJson) {
             String^ swarmId = "master_objective";
             String^ planFile = Path::Combine(p->SwarmsDir, "active_" + swarmId, "plan.json");
-            Console::WriteLine("{\"event\":\"dispatch_completed\",\"verb\":\"--dispatch-master\",\"status\":\"" +
-                (rc == 0 ? "ok" : "error") + "\",\"objective_file\":\"" + JsonX::EscapeJson(args[1]) +
-                "\",\"swarm_id\":\"" + swarmId + "\",\"plan_file\":\"" + JsonX::EscapeJson(planFile) + "\"}");
+            String^ status = (rc == 0 ? "ok" : "error");
+            String^ inner = "{\"event\":\"dispatch_completed\",\"verb\":\"--dispatch-master\",\"status\":\"" + status +
+                "\",\"objective_file\":\"" + JsonX::EscapeJson(args[1]) +
+                "\",\"swarm_id\":\"" + swarmId + "\",\"plan_file\":\"" + JsonX::EscapeJson(planFile) + "\"}";
+            ConsoleX::WrapEnvelope(inner, status);
         }
         return rc;
     }
@@ -2380,10 +2412,16 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
             String^ manifestPath = Path::Combine(
                 String::IsNullOrEmpty(p->ProjectName) ? p->DeliverablesDir : p->ProjectDeliverablesDir,
                 ".manifest.json");
-            Console::WriteLine("{\"event\":\"dispatch_completed\",\"verb\":\"--dispatch-template\",\"status\":\"" +
-                (rc == 0 ? "ok" : "error") + "\",\"task_id\":\"" + JsonX::EscapeJson(summaryTaskId) +
+            String^ status = (rc == 0 ? "ok" : "error");
+            // Note: pre-v0.3.18 this used ConsoleX::WriteText (suppressed
+            // by --json-only). v0.3.18: switch to WrapEnvelope so the
+            // JSON line is ALWAYS emitted (regardless of --json-only),
+            // and gets the envelope wrapper when --envelope is set.
+            String^ inner = "{\"event\":\"dispatch_completed\",\"verb\":\"--dispatch-template\",\"status\":\"" + status +
+                "\",\"task_id\":\"" + JsonX::EscapeJson(summaryTaskId) +
                 "\",\"project\":\"" + JsonX::EscapeJson(p->ProjectName) +
-                "\",\"manifest\":\"" + JsonX::EscapeJson(manifestPath) + "\"}");
+                "\",\"manifest\":\"" + JsonX::EscapeJson(manifestPath) + "\"}";
+            ConsoleX::WrapEnvelope(inner, status);
         }
         return rc;
     }
@@ -2445,18 +2483,22 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         // fails before forwarding, so we duplicate the JSON detection here.
         bool asJson = false;
         for (int i = 2; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; break; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; break; }
         }
         if (args->Length < 2) {
-            if (asJson) { Console::WriteLine("{\"event\":\"dispatch_completed\",\"verb\":\"--recipe\",\"status\":\"error\",\"error\":\"missing recipe name\"}"); }
-            else        { ConsoleX::Err("Usage: skill.exe --recipe <name> [--source <file> | --source-file <file>] [--task <id>] [--template-var k=v]..."); }
+            if (asJson) {
+                // v0.3.18: --envelope wraps the JSON line.
+                ConsoleX::WrapEnvelope("{\"event\":\"dispatch_completed\",\"verb\":\"--recipe\",\"status\":\"error\",\"error\":\"missing recipe name\"}", "error");
+            } else { ConsoleX::Err("Usage: skill.exe --recipe <name> [--source <file> | --source-file <file>] [--task <id>] [--template-var k=v]..."); }
             return 2;
         }
         String^ name = args[1];
         String^ templatePath = Path::Combine(p->TemplatesDir, name + ".json");
         if (!File::Exists(templatePath)) {
-            if (asJson) { Console::WriteLine("{\"event\":\"dispatch_completed\",\"verb\":\"--recipe\",\"status\":\"error\",\"error\":\"recipe not found\",\"recipe\":\"" + JsonX::EscapeJson(name) + "\",\"looked_in\":\"" + JsonX::EscapeJson(p->TemplatesDir) + "\"}"); }
-            else        { ConsoleX::Err("Recipe not found: " + templatePath + " (looked in " + p->TemplatesDir + ")"); }
+            if (asJson) {
+                String^ inner = "{\"event\":\"dispatch_completed\",\"verb\":\"--recipe\",\"status\":\"error\",\"error\":\"recipe not found\",\"recipe\":\"" + JsonX::EscapeJson(name) + "\",\"looked_in\":\"" + JsonX::EscapeJson(p->TemplatesDir) + "\"}";
+                ConsoleX::WrapEnvelope(inner, "error");
+            } else { ConsoleX::Err("Recipe not found: " + templatePath + " (looked in " + p->TemplatesDir + ")"); }
             return 2;
         }
         // Build the forwarded arg array. --source / --source-file are
@@ -2506,7 +2548,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         bool dryRun = false;
         for (int i = 2; i < args->Length; i++) {
             if (args[i] == "--dry-run") dryRun = true;
-            else if (args[i] == "--json") asJson = true;
+            else if (args[i] == "--json" || args[i] == "--json-only") asJson = true;
         }
         return CmdPackage(p, args[1], dryRun, asJson);
     }
@@ -2542,7 +2584,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--decision-list") {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; }
         }
         return CmdDecisionList(p, asJson);
     }
@@ -2646,7 +2688,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
             if (args[i] == "--project" && i + 1 < args->Length) { proj = args[i + 1]; i++; }
-            else if (args[i] == "--json")                       { asJson = true; }
+            else if (args[i] == "--json" || args[i] == "--json-only")                       { asJson = true; }
         }
         return CmdBudgetShow(p, proj, asJson);
     }
@@ -2691,7 +2733,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         String^ project = nullptr;
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; }
             else if (project == nullptr && !args[i]->StartsWith("--")) { project = args[i]; }
         }
         if (String::IsNullOrEmpty(project)) project = p->ProjectName;
@@ -2711,7 +2753,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
                 Console::WriteLine("(no memory slice for " + project + "; run --compile-memory first)");
                 return 0;
             }
-            Console::WriteLine(slice);
+            ConsoleX::WriteText(slice);
         }
         return 0;
     }
@@ -2720,14 +2762,14 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--hitl-status") {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; }
         }
         return CmdHitlStatus(p, asJson);
     }
     if (cmd == "--hitl-approve") {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; break; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; break; }
         }
         if (!asJson && args->Length < 2) { ConsoleX::Err("Usage: skill.exe --hitl-approve <task_id>"); return 2; }
         String^ taskId = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
@@ -2736,7 +2778,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--hitl-deny") {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; break; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; break; }
         }
         if (!asJson && args->Length < 2) { ConsoleX::Err("Usage: skill.exe --hitl-deny <task_id>"); return 2; }
         String^ taskId = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
@@ -2747,7 +2789,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--inspector-check") {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; break; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; break; }
         }
         if (!asJson && args->Length < 2) { ConsoleX::Err("Usage: skill.exe --inspector-check <task_id>"); return 2; }
         String^ taskId = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
@@ -2756,7 +2798,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--audit-trail") {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; }
         }
         return CmdAuditTrail(p, asJson);
     }
@@ -2765,7 +2807,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--plugins-list") {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; }
         }
         return CmdPluginsList(p, asJson);
     }
@@ -2786,7 +2828,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--plugin-remove") {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; break; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; break; }
         }
         if (!asJson && args->Length < 2) { ConsoleX::Err("Usage: skill.exe --plugin-remove <name>"); return 2; }
         String^ name = (args->Length >= 2 && !args[1]->StartsWith("--")) ? args[1] : "";
@@ -2796,7 +2838,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         // --plugin-install <url> [--name <plugin-name>] [--json]
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; }
         }
         if (!asJson && args->Length < 2) { ConsoleX::Err("Usage: skill.exe --plugin-install <github-url> [--name <name>]"); return 2; }
         String^ url = "";
@@ -2825,7 +2867,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--team-config") {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; }
         }
         return CmdTeamConfig(p, asJson);
     }
@@ -2834,7 +2876,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
     if (cmd == "--stream-list") {
         bool asJson = false;
         for (int i = 1; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; }
         }
         return CmdStreamList(p, asJson);
     }
@@ -2844,7 +2886,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         bool autoOpen = false, asJson = false;
         for (int i = 2; i < args->Length; i++) {
             if (args[i] == "--auto-open") { autoOpen = true; }
-            else if (args[i] == "--json")    { asJson = true; }
+            else if (args[i] == "--json" || args[i] == "--json-only")    { asJson = true; }
         }
         return CmdStream(p, args[1], autoOpen, asJson);
     }
@@ -2853,7 +2895,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --stream-stop <task_id> [--json]"); return 2; }
         bool asJson = false;
         for (int i = 2; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; }
         }
         return CmdStreamStop(p, args[1], asJson);
     }
@@ -2864,7 +2906,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         bool asJson = false;
         for (int i = 2; i < args->Length; i++) {
             if (args[i] == "--text" && i + 1 < args->Length) { hintText = args[++i]; }
-            else if (args[i] == "--json") { asJson = true; }
+            else if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; }
         }
         if (String::IsNullOrEmpty(hintText)) { ConsoleX::Err("--hint requires --text"); return 2; }
         return CmdHint(p, args[1], hintText, asJson);
@@ -2875,7 +2917,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         if (args->Length < 2) { ConsoleX::Err("Usage: skill.exe --stream-finalize <task_id> [--json]"); return 2; }
         bool asJson = false;
         for (int i = 2; i < args->Length; i++) {
-            if (args[i] == "--json") { asJson = true; }
+            if (args[i] == "--json" || args[i] == "--json-only") { asJson = true; }
         }
         return CmdStreamFinalize(p, args[1], asJson);
     }
