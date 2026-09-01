@@ -2626,6 +2626,75 @@ Write-Output '===END==='
     }
 
     # -----------------------------------------------------------------------
+    # G74: --envelope wraps the remaining --json modes (v0.3.19).
+    # v0.3.18 wrapped only the 5 dispatch verbs. v0.3.19 wraps all 32
+    # --json modes (the read-side + streaming + dispatch verbs). This test
+    # spot-checks 4 representative modes:
+    #   - --decision-list (read-side, JSON object)
+    #   - --agents-discover (read-side, JSON array)
+    #   - --team-config (read-side, JSON object with config+paths)
+    #   - --stream-list (streaming, JSON object with streams+total)
+    # Plus 1 verification: --budget-show wraps correctly with status=ok.
+    # -----------------------------------------------------------------------
+    $env:VORTEX_HOME = $scratchHome
+
+    $g74Decision = & pwsh -NoProfile -File $skillPath --decision-list --json --envelope 2>&1
+    $g74DecisionLine = Get-VortexSummaryLine $g74Decision
+    $g74DecisionJson = $null
+    if ($g74DecisionLine) { try { $g74DecisionJson = $g74DecisionLine | ConvertFrom-Json } catch {} }
+    Check "G74: --decision-list --json --envelope wraps in vortex_version+verb+result" {
+        $g74DecisionJson -and
+        $g74DecisionJson.PSObject.Properties['vortex_version'] -and
+        $g74DecisionJson.verb -eq '--decision-list' -and
+        $g74DecisionJson.PSObject.Properties['result'] -and
+        $g74DecisionJson.result.PSObject.Properties['decisions']
+    }
+
+    $g74Agents = & pwsh -NoProfile -File $skillPath --agents-discover --json --envelope 2>&1
+    $g74AgentsLine = Get-VortexSummaryLine $g74Agents
+    $g74AgentsJson = $null
+    if ($g74AgentsLine) { try { $g74AgentsJson = $g74AgentsLine | ConvertFrom-Json } catch {} }
+    Check "G74: --agents-discover --json --envelope wraps the agents array in result" {
+        $g74AgentsJson -and $g74AgentsJson.verb -eq '--agents-discover' -and
+        $g74AgentsJson.PSObject.Properties['result'] -and
+        $g74AgentsJson.result -is [array]
+    }
+
+    $g74Team = & pwsh -NoProfile -File $skillPath --team-config --json --envelope 2>&1
+    $g74TeamLine = Get-VortexSummaryLine $g74Team
+    $g74TeamJson = $null
+    if ($g74TeamLine) { try { $g74TeamJson = $g74TeamLine | ConvertFrom-Json } catch {} }
+    Check "G74: --team-config --json --envelope wraps the config+paths in result" {
+        $g74TeamJson -and $g74TeamJson.verb -eq '--team-config' -and
+        $g74TeamJson.PSObject.Properties['result'] -and
+        $g74TeamJson.result.PSObject.Properties['config'] -and
+        $g74TeamJson.result.PSObject.Properties['paths']
+    }
+
+    $g74StreamList = & pwsh -NoProfile -File $skillPath --stream-list --json --envelope 2>&1
+    $g74StreamListLine = Get-VortexSummaryLine $g74StreamList
+    $g74StreamListJson = $null
+    if ($g74StreamListLine) { try { $g74StreamListJson = $g74StreamListLine | ConvertFrom-Json } catch {} }
+    Check "G74: --stream-list --json --envelope wraps the streams array in result" {
+        $g74StreamListJson -and $g74StreamListJson.verb -eq '--stream-list' -and
+        $g74StreamListJson.PSObject.Properties['result'] -and
+        $g74StreamListJson.result.PSObject.Properties['streams'] -and
+        $g74StreamListJson.result.PSObject.Properties['total']
+    }
+
+    # --budget-show without a project returns the no-budget case; verify
+    # the envelope wraps it with status=ok.
+    $g74Budget = & pwsh -NoProfile -File $skillPath --budget-show --project nonexistent_proj_xyz --json --envelope 2>&1
+    $g74BudgetLine = Get-VortexSummaryLine $g74Budget
+    $g74BudgetJson = $null
+    if ($g74BudgetLine) { try { $g74BudgetJson = $g74BudgetLine | ConvertFrom-Json } catch {} }
+    Check "G74: --budget-show --json --envelope wraps the budget response in result" {
+        $g74BudgetJson -and $g74BudgetJson.verb -eq '--budget-show' -and
+        $g74BudgetJson.PSObject.Properties['result'] -and
+        $g74BudgetJson.status -eq 'ok'
+    }
+
+    # -----------------------------------------------------------------------
     # Summary
     # -----------------------------------------------------------------------
     Write-Host ""

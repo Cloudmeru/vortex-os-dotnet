@@ -59,7 +59,7 @@ namespace Vortex {
                 sb->Append(JsonSerializer::Serialize(discovered[i], discoverOpts));
             }
             sb->Append("]");
-            Console::WriteLine(sb->ToString());
+            ConsoleX::WrapEnvelope(sb->ToString(), "ok");
         } else {
             for each (JsonElement el in discovered) {
                 String^ name = JsonX::GetStr(el, "name");
@@ -79,7 +79,7 @@ namespace Vortex {
                         first = false;
                     }
                 }
-                Console::WriteLine(String::Format("{0}\t{1}\t{2}\t{3}",
+                ConsoleX::WriteText(String::Format("{0}\t{1}\t{2}\t{3}",
                                                    name, ver, kind, caps->ToString()));
             }
         }
@@ -94,7 +94,7 @@ namespace Vortex {
         if (target == "--all" || String::IsNullOrEmpty(target)) {
             if (!Directory::Exists(p->AgentsDir)) {
                 if (asJson) {
-                    Console::WriteLine("{\"results\":[],\"pass\":0,\"fail\":1,\"error\":\"agents dir not found: " + JsonX::EscapeJson(p->AgentsDir) + "\"}");
+                    ConsoleX::WrapEnvelope("{\"results\":[],\"pass\":0,\"fail\":1,\"error\":\"agents dir not found: " + JsonX::EscapeJson(p->AgentsDir) + "\"}", "ok");
                 } else {
                     Console::WriteLine("LINT_FAIL: agents dir not found");
                 }
@@ -165,7 +165,7 @@ namespace Vortex {
             sb->Append("],\"pass\":"); sb->Append(pass);
             sb->Append(",\"fail\":"); sb->Append(fail);
             sb->Append("}");
-            Console::WriteLine(sb->ToString());
+            ConsoleX::WrapEnvelope(sb->ToString(), "ok");
             return fail > 0 ? 1 : 0;
         }
         // Text mode return code: 0 if all pass, 1 if any fail (matches pre-v0.3.11)
@@ -198,12 +198,12 @@ namespace Vortex {
             }
             sb->Append("],\"total\":"); sb->Append(nodes->Count);
             sb->Append("}");
-            Console::WriteLine(sb->ToString());
+            ConsoleX::WrapEnvelope(sb->ToString(), "ok");
             return 0;
         }
-        Console::WriteLine("(graph for " + (format == nullptr ? "ascii" : format) + ")");
+        ConsoleX::WriteText("(graph for " + (format == nullptr ? "ascii" : format) + ")");
         for each (String ^ n in nodes) {
-            Console::WriteLine("  " + n);
+            ConsoleX::WriteText("  " + n);
         }
         return 0;
     }
@@ -214,7 +214,7 @@ namespace Vortex {
     int Commands::AgentsInspect(Paths^ p, String^ name, bool asJson) {
         if (String::IsNullOrEmpty(name)) {
             if (asJson) {
-                Console::WriteLine("{\"error\":\"--agents-inspect requires a name\"}");
+                ConsoleX::WrapEnvelope("{\"error\":\"--agents-inspect requires a name\"}", "error");
             } else {
                 Console::WriteLine("Usage: --agents-inspect <name>");
             }
@@ -223,7 +223,7 @@ namespace Vortex {
         String^ f = Path::Combine(p->AgentsDir, name + ".json");
         if (!File::Exists(f)) {
             if (asJson) {
-                Console::WriteLine("{\"error\":\"Agent not found: " + JsonX::EscapeJson(name) + "\",\"path\":\"" + JsonX::EscapeJson(f) + "\"}");
+                ConsoleX::WrapEnvelope("{\"error\":\"Agent not found: " + JsonX::EscapeJson(name) + "\",\"path\":\"" + JsonX::EscapeJson(f) + "\"}", "error");
             } else {
                 Console::WriteLine("Agent not found: " + name);
             }
@@ -238,7 +238,7 @@ namespace Vortex {
             // single-line contract.
             JsonDocument^ doc = JsonX::ReadFile(f);
             if (doc == nullptr) {
-                Console::WriteLine("{\"error\":\"Invalid JSON in: " + JsonX::EscapeJson(f) + "\"}");
+                ConsoleX::WrapEnvelope("{\"error\":\"Invalid JSON in: " + JsonX::EscapeJson(f) + "\"}", "error");
                 return 1;
             }
             JsonSerializerOptions^ inspectOpts = gcnew JsonSerializerOptions();
@@ -249,7 +249,7 @@ namespace Vortex {
             // existing File::ReadAllText path. (No pretty-print in C++/CLI
             // without an extra serializer call; the on-disk file is
             // typically hand-formatted, so this is fine.)
-            Console::WriteLine(File::ReadAllText(f));
+            ConsoleX::WriteText(File::ReadAllText(f));
         }
         return 0;
     }
@@ -260,7 +260,7 @@ namespace Vortex {
     int Commands::AgentsValidate(String^ file, bool asJson) {
         if (String::IsNullOrEmpty(file) || !File::Exists(file)) {
             if (asJson) {
-                Console::WriteLine("{\"error\":\"--agents-validate requires an existing file\",\"path\":\"" + JsonX::EscapeJson(file == nullptr ? "" : file) + "\"}");
+                ConsoleX::WrapEnvelope("{\"error\":\"--agents-validate requires an existing file\",\"path\":\"" + JsonX::EscapeJson(file == nullptr ? "" : file) + "\"}", "error");
             } else {
                 Console::WriteLine("Usage: --agents-validate <file.json>");
             }
@@ -269,7 +269,7 @@ namespace Vortex {
         JsonDocument^ doc = JsonX::ReadFile(file);
         if (doc == nullptr) {
             if (asJson) {
-                Console::WriteLine("{\"file\":\"" + JsonX::EscapeJson(file) + "\",\"ok\":false,\"missing\":[],\"reason\":\"invalid JSON\"}");
+                ConsoleX::WrapEnvelope("{\"file\":\"" + JsonX::EscapeJson(file) + "\",\"ok\":false,\"missing\":[],\"reason\":\"invalid JSON\"}", "ok");
             } else {
                 Console::WriteLine("Invalid: " + file);
             }
@@ -301,9 +301,9 @@ namespace Vortex {
             sb->Append("],\"reason\":\"");
             sb->Append(ok ? "all required fields present" : "missing required fields");
             sb->Append("\"}");
-            Console::WriteLine(sb->ToString());
+            ConsoleX::WrapEnvelope(sb->ToString(), "ok");
         } else {
-            Console::WriteLine(ok ? ("Valid: " + file) : ("Invalid: " + file));
+            ConsoleX::WriteText(ok ? ("Valid: " + file) : ("Invalid: " + file));
         }
         return ok ? 0 : 1;
     }
@@ -314,7 +314,7 @@ namespace Vortex {
     int Commands::AgentsTrace(Paths^ p, String^ runId, bool asJson) {
         if (String::IsNullOrEmpty(runId)) {
             if (asJson) {
-                Console::WriteLine("{\"error\":\"--agents-trace requires a run_id\"}");
+                ConsoleX::WrapEnvelope("{\"error\":\"--agents-trace requires a run_id\"}", "error");
             } else {
                 Console::WriteLine("Usage: --agents-trace <run_id>");
             }
@@ -323,7 +323,7 @@ namespace Vortex {
         String^ log = Path::Combine(p->MemoryDir, "audit.jsonl");
         if (!File::Exists(log)) {
             if (asJson) {
-                Console::WriteLine("{\"run_id\":\"" + JsonX::EscapeJson(runId) + "\",\"entries\":[],\"total\":0,\"log\":\"" + JsonX::EscapeJson(log) + "\"}");
+                ConsoleX::WrapEnvelope("{\"run_id\":\"" + JsonX::EscapeJson(runId) + "\",\"entries\":[],\"total\":0,\"log\":\"" + JsonX::EscapeJson(log) + "\"}", "ok");
             } else {
                 Console::WriteLine("(no audit log)");
             }
@@ -359,13 +359,13 @@ namespace Vortex {
             sb->Append("],\"total\":"); sb->Append(matching->Count);
             sb->Append(",\"log\":\""); sb->Append(JsonX::EscapeJson(log));
             sb->Append("\"}");
-            Console::WriteLine(sb->ToString());
+            ConsoleX::WrapEnvelope(sb->ToString(), "ok");
             return 0;
         }
         for each (String ^ line in matching) {
-            Console::WriteLine(line);
+            ConsoleX::WriteText(line);
         }
-        if (matching->Count == 0) Console::WriteLine("(no trace entries)");
+        if (matching->Count == 0) ConsoleX::WriteText("(no trace entries)");
         return 0;
     }
 
@@ -375,7 +375,7 @@ namespace Vortex {
     int Commands::AgentsFactoryDiff(Paths^ p, String^ name, bool asJson) {
         if (String::IsNullOrEmpty(name)) {
             if (asJson) {
-                Console::WriteLine("{\"error\":\"--agents-factory-diff requires a name\"}");
+                ConsoleX::WrapEnvelope("{\"error\":\"--agents-factory-diff requires a name\"}", "error");
             } else {
                 Console::WriteLine("Usage: --agents-factory-diff <name>");
             }
@@ -384,7 +384,7 @@ namespace Vortex {
         String^ f = Path::Combine(p->AgentsDir, name + ".json");
         if (!File::Exists(f)) {
             if (asJson) {
-                Console::WriteLine("{\"error\":\"Agent not found: " + JsonX::EscapeJson(name) + "\"}");
+                ConsoleX::WrapEnvelope("{\"error\":\"Agent not found: " + JsonX::EscapeJson(name) + "\"}", "error");
             } else {
                 Console::WriteLine("Agent not found: " + name);
             }
@@ -393,7 +393,7 @@ namespace Vortex {
         JsonDocument^ doc = JsonX::ReadFile(f);
         if (doc == nullptr) {
             if (asJson) {
-                Console::WriteLine("{\"error\":\"Invalid JSON in: " + JsonX::EscapeJson(f) + "\"}");
+                ConsoleX::WrapEnvelope("{\"error\":\"Invalid JSON in: " + JsonX::EscapeJson(f) + "\"}", "error");
             }
             return 1;
         }
@@ -419,10 +419,10 @@ namespace Vortex {
                 sb->Append("\""); sb->Append(JsonX::EscapeJson(caps[i])); sb->Append("\"");
             }
             sb->Append("]}");
-            Console::WriteLine(sb->ToString());
+            ConsoleX::WrapEnvelope(sb->ToString(), "ok");
             return 0;
         }
-        Console::WriteLine(String::Format("{0} v{1} — kind={2} caps={3}",
+        ConsoleX::WriteText(String::Format("{0} v{1} — kind={2} caps={3}",
                                            name, ver, kind, String::Join(",", caps->ToArray())));
         return 0;
     }
@@ -432,15 +432,15 @@ namespace Vortex {
     // -------------------------------------------------------------------------
     int Commands::CompileAgent(Paths^ p, String^ name) {
         if (String::IsNullOrEmpty(name)) {
-            Console::WriteLine("Usage: compile-agent <name>");
+            ConsoleX::WriteText("Usage: compile-agent <name>");
             return 1;
         }
         String^ f = Path::Combine(p->AgentsDir, name + ".json");
         if (!File::Exists(f)) {
-            Console::WriteLine("Agent not found: " + name);
+            ConsoleX::WriteText("Agent not found: " + name);
             return 1;
         }
-        Console::WriteLine("Compiling agent: " + name);
+        ConsoleX::WriteText("Compiling agent: " + name);
         JsonDocument^ doc = JsonX::ReadFile(f);
         if (doc == nullptr) return 1;
         JsonElement root = doc->RootElement;
@@ -448,13 +448,13 @@ namespace Vortex {
         String^ kind   = JsonX::GetStrOr(root, "kind",    "");
         String^ entry  = JsonX::GetStrOr(root, "entry",   "");
         String^ nm     = JsonX::GetStrOr(root, "name",     name);
-        Console::WriteLine(String::Format(
+        ConsoleX::WriteText(String::Format(
             "{{\"name\":\"{0}\",\"version\":\"{1}\",\"kind\":\"{2}\",\"entry\":\"{3}\"}}",
             JsonX::EscapeJson(nm),
             JsonX::EscapeJson(ver),
             JsonX::EscapeJson(kind),
             JsonX::EscapeJson(entry)));
-        Console::WriteLine("OK");
+        ConsoleX::WriteText("OK");
         return 0;
     }
 
@@ -463,7 +463,7 @@ namespace Vortex {
     // -------------------------------------------------------------------------
     int Commands::AdversarialCheck(String^ input) {
         if (String::IsNullOrEmpty(input)) {
-            Console::WriteLine("Usage: adversarial-check <text>");
+            ConsoleX::WriteText("Usage: adversarial-check <text>");
             return 1;
         }
         try {
@@ -473,11 +473,11 @@ namespace Vortex {
                 "reveal (your|the) (system|hidden) prompt",
                 RegexOptions::IgnoreCase);
             if (rx->IsMatch(input)) {
-                Console::WriteLine("ADVERSARIAL: prompt injection detected");
+                ConsoleX::WriteText("ADVERSARIAL: prompt injection detected");
                 return 1;
             }
         } catch (Exception^) {}
-        Console::WriteLine("ADVERSARIAL_OK");
+        ConsoleX::WriteText("ADVERSARIAL_OK");
         return 0;
     }
 
@@ -485,17 +485,17 @@ namespace Vortex {
     // Consensus — show first 5 agents, ACK
     // -------------------------------------------------------------------------
     int Commands::Consensus(String^ agentsJson, double threshold) {
-        Console::WriteLine(String::Format(
+        ConsoleX::WriteText(String::Format(
             "Consensus across agents (threshold={0}):", threshold.ToString("0.00")));
         try {
             JsonDocument^ doc = JsonDocument::Parse(agentsJson);
             int shown = 0;
             for each (JsonElement el in doc->RootElement.EnumerateArray()) {
-                Console::WriteLine(el.GetRawText());
+                ConsoleX::WriteText(el.GetRawText());
                 if (++shown >= 5) break;
             }
         } catch (Exception^) {}
-        Console::WriteLine("OK");
+        ConsoleX::WriteText("OK");
         return 0;
     }
 
@@ -519,13 +519,13 @@ namespace Vortex {
     // downstream readers can rely on the file existing.
     // -------------------------------------------------------------------------
     int Commands::VectorHydrate(Paths^ p) {
-        Console::WriteLine("Hydrating vector store from agents/ ...");
+        ConsoleX::WriteText("Hydrating vector store from agents/ ...");
         // vector_schema.sql is a skill-scope file (it's part of the engine
         // library that ships with the skill), so it lives under SkillDir
         // (= <skill>/lib/), not under the durable VORTEX_HOME.
         String^ schemaFile = Path::Combine(p->SkillDir, "lib", "vector_schema.sql");
         if (!File::Exists(schemaFile)) {
-            Console::WriteLine("OK (no schema file)");
+            ConsoleX::WriteText("OK (no schema file)");
             return 0;
         }
         String^ dbFile = Path::Combine(p->MemoryDir, "vectors.db");
@@ -551,16 +551,16 @@ namespace Vortex {
             // v0.2.3 (G4): instead of silently no-op'ing, write the JSON
             // sidecar (above) + leave a breadcrumb so operators know
             // semantic search is disabled but the meta store is durable.
-            Console::WriteLine("OK (sqlite3 not available, using JSON sidecar at memory/vectors.json; semantic search disabled)");
+            ConsoleX::WriteText("OK (sqlite3 not available, using JSON sidecar at memory/vectors.json; semantic search disabled)");
             return 0;
         }
         int exitCode = 0;
         ShellX::Run("sqlite3", String::Format("\"{0}\" < \"{1}\"", dbFile, schemaFile), exitCode);
         if (exitCode != 0) {
-            Console::WriteLine("WARN: sqlite3 hydrate exited with code " + exitCode + "; falling back to JSON sidecar");
+            ConsoleX::WriteText("WARN: sqlite3 hydrate exited with code " + exitCode + "; falling back to JSON sidecar");
             return 0;  // still non-fatal -- the JSON sidecar is durable
         }
-        Console::WriteLine("OK (memory/vectors.db initialized; JSON sidecar at memory/vectors.json)");
+        ConsoleX::WriteText("OK (memory/vectors.db initialized; JSON sidecar at memory/vectors.json)");
         return 0;
     }
 
@@ -569,18 +569,18 @@ namespace Vortex {
     // -------------------------------------------------------------------------
     int Commands::SandboxExecute(String^ scriptPath) {
         if (String::IsNullOrEmpty(scriptPath) || !File::Exists(scriptPath)) {
-            Console::WriteLine("SANDBOX_FAIL: file missing: " + scriptPath);
+            ConsoleX::WriteText("SANDBOX_FAIL: file missing: " + scriptPath);
             return 1;
         }
         String^ content = File::ReadAllText(scriptPath);
         array<String^>^ required = gcnew array<String^> { "id=", "click", "keyframe", "function" };
         for each (String ^ r in required) {
             if (!content->ToLower()->Contains(r->ToLower())) {
-                Console::WriteLine("SANDBOX_FAIL: missing token: " + r);
+                ConsoleX::WriteText("SANDBOX_FAIL: missing token: " + r);
                 return 1;
             }
         }
-        Console::WriteLine("SANDBOX_OK: " + scriptPath);
+        ConsoleX::WriteText("SANDBOX_OK: " + scriptPath);
         return 0;
     }
 
@@ -589,17 +589,17 @@ namespace Vortex {
     // -------------------------------------------------------------------------
     int Commands::Cart(Paths^ p, String^ action) {
         if (action == "list" || String::IsNullOrEmpty(action)) {
-            Console::WriteLine("CART (capability registry):");
+            ConsoleX::WriteText("CART (capability registry):");
             if (Directory::Exists(p->AgentsDir)) {
                 int count = 0;
                 for each (String ^ f in Directory::GetFiles(p->AgentsDir, "*.json", SearchOption::AllDirectories)) {
-                    Console::WriteLine(f);
+                    ConsoleX::WriteText(f);
                     if (++count >= 20) break;
                 }
             }
             return 0;
         }
-        Console::WriteLine("Usage: cart [list]");
+        ConsoleX::WriteText("Usage: cart [list]");
         return 1;
     }
 
@@ -607,15 +607,15 @@ namespace Vortex {
     // V3 / V3.2 pipelines (stubs)
     // -------------------------------------------------------------------------
     int Commands::DispatchV3Pipeline(String^ taskId, String^ agentName) {
-        Console::WriteLine("V3 dispatch: task=" + taskId + " agent=" + agentName);
-        Console::WriteLine("V3_OK");
+        ConsoleX::WriteText("V3 dispatch: task=" + taskId + " agent=" + agentName);
+        ConsoleX::WriteText("V3_OK");
         return 0;
     }
 
     int Commands::DispatchV3_2Pipeline(String^ taskId, String^ agentName) {
-        Console::WriteLine("V3.2 dispatch: task=" + taskId + " agent=" + agentName);
+        ConsoleX::WriteText("V3.2 dispatch: task=" + taskId + " agent=" + agentName);
         ClassifyAndRoute(taskId, nullptr);
-        Console::WriteLine("V3_2_OK");
+        ConsoleX::WriteText("V3_2_OK");
         return 0;
     }
 
@@ -635,14 +635,14 @@ namespace Vortex {
             taskId, agentName, objectiveRef == nullptr ? "" : objectiveRef, ts);
         File::WriteAllText(taskFile, body);
 
-        Console::WriteLine("V4 dispatch: task=" + taskId + " agent=" + agentName + " ref=" + objectiveRef);
+        ConsoleX::WriteText("V4 dispatch: task=" + taskId + " agent=" + agentName + " ref=" + objectiveRef);
         String^ audit = Path::Combine(p->MemoryDir, "audit.jsonl");
         long epoch = (long)(DateTime::UtcNow - DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind::Utc)).TotalSeconds;
         String^ line = String::Format(
             "{{\"ts\":{0},\"event\":\"v4_dispatch\",\"task_id\":\"{1}\",\"agent\":\"{2}\"}}",
             epoch, taskId, agentName);
         File::AppendAllText(audit, line + Environment::NewLine);
-        Console::WriteLine("V4_QUEUED");
+        ConsoleX::WriteText("V4_QUEUED");
         return 0;
     }
 
@@ -650,11 +650,11 @@ namespace Vortex {
     // REPL iterate (stub)
     // -------------------------------------------------------------------------
     int Commands::ReplIterate(String^ dataset, String^ goal) {
-        Console::WriteLine("REPL iterate: dataset=" + dataset + " goal=" + goal);
+        ConsoleX::WriteText("REPL iterate: dataset=" + dataset + " goal=" + goal);
         for (int i = 1; i <= 3; i++) {
-            Console::WriteLine("  iteration " + i + ": improving output...");
+            ConsoleX::WriteText("  iteration " + i + ": improving output...");
         }
-        Console::WriteLine("REPL_OK");
+        ConsoleX::WriteText("REPL_OK");
         return 0;
     }
 
@@ -662,9 +662,9 @@ namespace Vortex {
     // Classify-Discover-Dispatch
     // -------------------------------------------------------------------------
     int Commands::ClassifyDiscoverDispatch(String^ task, String^ caps) {
-        Console::WriteLine("Classify-Discover-Dispatch: task=" + task + " caps=" + caps);
+        ConsoleX::WriteText("Classify-Discover-Dispatch: task=" + task + " caps=" + caps);
         ClassifyAndRoute(task, nullptr);
-        Console::WriteLine("CDD_OK");
+        ConsoleX::WriteText("CDD_OK");
         return 0;
     }
 
@@ -673,19 +673,19 @@ namespace Vortex {
     // -------------------------------------------------------------------------
     int Commands::ClassifyAndRoute(String^ task, String^ forceClass) {
         if (!String::IsNullOrEmpty(forceClass)) {
-            Console::WriteLine("Route: " + forceClass);
+            ConsoleX::WriteText("Route: " + forceClass);
             return 0;
         }
         try {
             Regex^ codeRx  = gcnew Regex("code|html|javascript|typescript", RegexOptions::IgnoreCase);
             Regex^ mediaRx = gcnew Regex("audio|music|sound", RegexOptions::IgnoreCase);
             Regex^ textRx  = gcnew Regex("novel|dialogue|scene|story|write", RegexOptions::IgnoreCase);
-            if (codeRx->IsMatch(task))       Console::WriteLine("Route: CODE_GEN");
-            else if (mediaRx->IsMatch(task)) Console::WriteLine("Route: MEDIA_GEN");
-            else if (textRx->IsMatch(task))  Console::WriteLine("Route: TEXT_GEN");
-            else                              Console::WriteLine("Route: UNKNOWN");
+            if (codeRx->IsMatch(task))       ConsoleX::WriteText("Route: CODE_GEN");
+            else if (mediaRx->IsMatch(task)) ConsoleX::WriteText("Route: MEDIA_GEN");
+            else if (textRx->IsMatch(task))  ConsoleX::WriteText("Route: TEXT_GEN");
+            else                              ConsoleX::WriteText("Route: UNKNOWN");
         } catch (Exception^) {
-            Console::WriteLine("Route: UNKNOWN");
+            ConsoleX::WriteText("Route: UNKNOWN");
         }
         return 0;
     }

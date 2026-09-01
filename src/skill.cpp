@@ -496,7 +496,7 @@ static int CmdDecisionRecord(Paths^ p, String^ taskId, String^ gate, String^ sev
                              String^ choice, String^ reason, int episodeNumber, bool asJson) {
     if (String::IsNullOrEmpty(gate) || String::IsNullOrEmpty(choice)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"--decision-record requires --gate <name> and --choice <text>\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"--decision-record requires --gate <name> and --choice <text>\"}", "error");
         } else {
             ConsoleX::Err("Usage: skill.exe --decision-record --task <id> --gate <name> --severity <HIGH|CRITICAL|LOW> --choice <text> [--reason <text>] [--episode <N>]");
         }
@@ -513,7 +513,7 @@ static int CmdDecisionRecord(Paths^ p, String^ taskId, String^ gate, String^ sev
         sb->Append("\",\"episode_number\":"); sb->Append(episodeNumber);
         sb->Append(",\"index\":"); sb->Append(n);
         sb->Append("}");
-        Console::WriteLine(sb->ToString());
+        ConsoleX::WrapEnvelope(sb->ToString(), "ok");
     } else {
         ConsoleX::Ok("Recorded decision #" + n + " for gate '" + gate + "': " + choice);
     }
@@ -525,7 +525,7 @@ static int CmdDecisionRecord(Paths^ p, String^ taskId, String^ gate, String^ sev
 // Default mode is the human-readable table.
 static int CmdDecisionList(Paths^ p, bool asJson) {
     if (asJson) {
-        Console::WriteLine(Decisions::FormatJson(p));
+        ConsoleX::WrapEnvelope(Decisions::FormatJson(p), "ok");
     } else {
         ConsoleX::Banner("VORTEX-OS - Decision History");
         Console::Write(Decisions::FormatTable(p));
@@ -536,7 +536,7 @@ static int CmdDecisionList(Paths^ p, bool asJson) {
 // Cost report: by project, optionally filtered by --since and --agent.
 static int CmdCostReport(Paths^ p, String^ project, long sinceUnix, String^ agent, bool asJson) {
     if (asJson) {
-        Console::WriteLine(CostTracker::FormatReport(p, project, sinceUnix, true));
+        ConsoleX::WrapEnvelope(CostTracker::FormatReport(p, project, sinceUnix, true), "ok");
     } else {
         ConsoleX::Banner("VORTEX-OS - Cost Report");
         Console::Write(CostTracker::FormatReport(p, project, sinceUnix, false));
@@ -552,7 +552,7 @@ static int CmdCostRecord(Paths^ p, String^ taskId, String^ agent, String^ model,
                          int tokensIn, int tokensOut, int durationMs, String^ tags, bool asJson) {
     if (String::IsNullOrEmpty(taskId) || String::IsNullOrEmpty(agent) || String::IsNullOrEmpty(model)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"--cost-record requires --task, --agent, --model\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"--cost-record requires --task, --agent, --model\"}", "error");
         } else {
             ConsoleX::Err("Usage: --cost-record --task <id> --agent <name> --model <name> --tokens-in N --tokens-out N [--duration-ms N] [--tags t1,t2]");
         }
@@ -598,7 +598,7 @@ static int CmdCostRecord(Paths^ p, String^ taskId, String^ agent, String^ model,
 static int CmdCostEstimate(Paths^ p, String^ model, int tokensIn, int tokensOut, bool asJson) {
     if (String::IsNullOrEmpty(model)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"--cost-estimate requires --model <name>\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"--cost-estimate requires --model <name>\"}", "error");
         } else {
             ConsoleX::Err("Usage: --cost-estimate --model <name> --tokens-in N --tokens-out N");
         }
@@ -613,7 +613,7 @@ static int CmdCostEstimate(Paths^ p, String^ model, int tokensIn, int tokensOut,
         sb->Append(",\"cost_usd\":");
         sb->Append(cost.ToString("F6", System::Globalization::CultureInfo::InvariantCulture));
         sb->Append("}");
-        Console::WriteLine(sb->ToString());
+        ConsoleX::WrapEnvelope(sb->ToString(), "ok");
     } else {
         Console::WriteLine("  Model:     " + model);
         Console::WriteLine("  Tokens:    " + (tokensIn + tokensOut) + " (in=" + tokensIn + ", out=" + tokensOut + ")");
@@ -629,7 +629,7 @@ static int CmdCostEstimate(Paths^ p, String^ model, int tokensIn, int tokensOut,
 static int CmdBudgetSet(Paths^ p, String^ project, long tokensTotal, double usdTotal, bool asJson) {
     if (String::IsNullOrEmpty(project)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"--budget-set requires --project <name>\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"--budget-set requires --project <name>\"}", "error");
         } else {
             ConsoleX::Err("Usage: --budget-set --project <name> [--tokens-total N] [--usd-total N]");
         }
@@ -637,7 +637,7 @@ static int CmdBudgetSet(Paths^ p, String^ project, long tokensTotal, double usdT
     }
     if (tokensTotal == 0 && usdTotal == 0) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"at least one of --tokens-total or --usd-total must be set\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"at least one of --tokens-total or --usd-total must be set\"}", "error");
         } else {
             ConsoleX::Err("At least one of --tokens-total or --usd-total must be set.");
         }
@@ -662,7 +662,7 @@ static int CmdBudgetSet(Paths^ p, String^ project, long tokensTotal, double usdT
         sb->Append(",\"usd_total\":");
         sb->Append(usdTotal.ToString("F6", System::Globalization::CultureInfo::InvariantCulture));
         sb->Append("}");
-        Console::WriteLine(sb->ToString());
+        ConsoleX::WrapEnvelope(sb->ToString(), "ok");
     } else {
         ConsoleX::Ok("Set budget for project '" + project + "': tokens_total=" + tokensTotal + " usd_total=$" + usdTotal.ToString("F2"));
     }
@@ -676,7 +676,7 @@ static int CmdBudgetSet(Paths^ p, String^ project, long tokensTotal, double usdT
 static int CmdBudgetShow(Paths^ p, String^ project, bool asJson) {
     if (String::IsNullOrEmpty(project)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"--budget-show requires --project <name>\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"--budget-show requires --project <name>\"}", "error");
         } else {
             ConsoleX::Err("Usage: --budget-show --project <name>");
         }
@@ -699,7 +699,7 @@ static int CmdBudgetShow(Paths^ p, String^ project, bool asJson) {
         sb->Append("},\"percent_used\":");
         sb->Append(pct.ToString("F2", System::Globalization::CultureInfo::InvariantCulture));
         sb->Append("}");
-        Console::WriteLine(sb->ToString());
+        ConsoleX::WrapEnvelope(sb->ToString(), "ok");
     } else {
         ConsoleX::Banner("Budget: " + project);
         Console::WriteLine("  tokens_total: " + tokensTotal);
@@ -746,7 +746,7 @@ static int CmdHitlStatus(Paths^ p, bool asJson) {
             sb->Append("\"}");
         }
         sb->Append("],\"total\":"); sb->Append(items->Count); sb->Append("}");
-        Console::WriteLine(sb->ToString());
+        ConsoleX::WrapEnvelope(sb->ToString(), "ok");
         return 0;
     }
     if (items->Count == 0) {
@@ -769,7 +769,7 @@ static int CmdHitlStatus(Paths^ p, bool asJson) {
 static int CmdHitlApprove(Paths^ p, String^ taskId, bool asJson) {
     if (String::IsNullOrEmpty(taskId)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"--hitl-approve requires <task_id>\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"--hitl-approve requires <task_id>\"}", "error");
         } else {
             ConsoleX::Err("Usage: skill.exe --hitl-approve <task_id>");
         }
@@ -778,7 +778,7 @@ static int CmdHitlApprove(Paths^ p, String^ taskId, bool asJson) {
     String^ f = Path::Combine(p->StateDir, "pending_approvals", taskId + ".json");
     if (!File::Exists(f)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"No pending HITL request for: " + JsonX::EscapeJson(taskId) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"No pending HITL request for: " + JsonX::EscapeJson(taskId) + "\"}", "error");
         } else {
             ConsoleX::Err("No pending HITL request for: " + taskId);
         }
@@ -787,7 +787,7 @@ static int CmdHitlApprove(Paths^ p, String^ taskId, bool asJson) {
     JsonDocument^ doc = JsonX::ReadFile(f);
     if (doc == nullptr) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"Invalid checkpoint file: " + JsonX::EscapeJson(f) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"Invalid checkpoint file: " + JsonX::EscapeJson(f) + "\"}", "error");
         } else {
             ConsoleX::Err("Invalid checkpoint file: " + f);
         }
@@ -836,7 +836,7 @@ static int CmdHitlApprove(Paths^ p, String^ taskId, bool asJson) {
         if (reread != nullptr) {
             JsonSerializerOptions^ approveOpts = gcnew JsonSerializerOptions();
             approveOpts->WriteIndented = false;
-            Console::WriteLine(JsonSerializer::Serialize(reread->RootElement, approveOpts));
+            ConsoleX::WrapEnvelope(JsonSerializer::Serialize(reread->RootElement, approveOpts), "ok");
         } else {
             Console::WriteLine(body);
         }
@@ -851,7 +851,7 @@ static int CmdHitlApprove(Paths^ p, String^ taskId, bool asJson) {
 static int CmdHitlDeny(Paths^ p, String^ taskId, bool asJson) {
     if (String::IsNullOrEmpty(taskId)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"--hitl-deny requires <task_id>\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"--hitl-deny requires <task_id>\"}", "error");
         } else {
             ConsoleX::Err("Usage: skill.exe --hitl-deny <task_id>");
         }
@@ -860,7 +860,7 @@ static int CmdHitlDeny(Paths^ p, String^ taskId, bool asJson) {
     String^ f = Path::Combine(p->StateDir, "pending_approvals", taskId + ".json");
     if (!File::Exists(f)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"No pending HITL request for: " + JsonX::EscapeJson(taskId) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"No pending HITL request for: " + JsonX::EscapeJson(taskId) + "\"}", "error");
         } else {
             ConsoleX::Err("No pending HITL request for: " + taskId);
         }
@@ -869,7 +869,7 @@ static int CmdHitlDeny(Paths^ p, String^ taskId, bool asJson) {
     JsonDocument^ doc = JsonX::ReadFile(f);
     if (doc == nullptr) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"Invalid checkpoint file: " + JsonX::EscapeJson(f) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"Invalid checkpoint file: " + JsonX::EscapeJson(f) + "\"}", "error");
         } else {
             ConsoleX::Err("Invalid checkpoint file: " + f);
         }
@@ -908,7 +908,7 @@ static int CmdHitlDeny(Paths^ p, String^ taskId, bool asJson) {
         if (reread != nullptr) {
             JsonSerializerOptions^ denyOpts = gcnew JsonSerializerOptions();
             denyOpts->WriteIndented = false;
-            Console::WriteLine(JsonSerializer::Serialize(reread->RootElement, denyOpts));
+            ConsoleX::WrapEnvelope(JsonSerializer::Serialize(reread->RootElement, denyOpts), "ok");
         } else {
             Console::WriteLine(body);
         }
@@ -928,7 +928,7 @@ static int CmdHitlDeny(Paths^ p, String^ taskId, bool asJson) {
 static int CmdInspectorCheck(Paths^ p, String^ taskId, bool asJson) {
     if (String::IsNullOrEmpty(taskId)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"--inspector-check requires <task_id>\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"--inspector-check requires <task_id>\"}", "error");
         } else {
             ConsoleX::Err("Usage: skill.exe --inspector-check <task_id>");
         }
@@ -944,7 +944,7 @@ static int CmdInspectorCheck(Paths^ p, String^ taskId, bool asJson) {
         sb->Append("\",\"return_code\":"); sb->Append(rc);
         sb->Append(",\"verdict\":\""); sb->Append(rc == 0 ? "pass" : (rc == 1 ? "soft_fail" : "hard_fail"));
         sb->Append("\",\"findings_count\":-1,\"invariants\":[]}");
-        Console::WriteLine(sb->ToString());
+        ConsoleX::WrapEnvelope(sb->ToString(), "ok");
         return rc;
     } else {
         Console::WriteLine("  >> Running Continuity Engine check on: " + taskId);
@@ -962,7 +962,7 @@ static int CmdAuditTrail(Paths^ p, bool asJson) {
     String^ log = Path::Combine(p->MemoryDir, "audit.jsonl");
     if (!File::Exists(log)) {
         if (asJson) {
-            Console::WriteLine("{\"entries\":[],\"total\":0,\"log\":\"" + JsonX::EscapeJson(log) + "\",\"truncated\":false}");
+            ConsoleX::WrapEnvelope("{\"entries\":[],\"total\":0,\"log\":\"" + JsonX::EscapeJson(log) + "\",\"truncated\":false}", "ok");
         } else {
             Console::WriteLine("  No audit trail yet (run --dispatch-master to generate one).");
         }
@@ -992,7 +992,7 @@ static int CmdAuditTrail(Paths^ p, bool asJson) {
         sb->Append(",\"log\":\""); sb->Append(JsonX::EscapeJson(log));
         sb->Append("\",\"truncated\":"); sb->Append(truncated ? "true" : "false");
         sb->Append("}");
-        Console::WriteLine(sb->ToString());
+        ConsoleX::WrapEnvelope(sb->ToString(), "ok");
         return 0;
     }
     ConsoleX::WriteText("  Audit trail (last 50 entries):");
@@ -1018,10 +1018,11 @@ static int CmdAuditTrail(Paths^ p, bool asJson) {
 // at runtime instead of hardcoding. The Vortex.psd1 is located in the
 // same directory as the loaded Vortex.dll (via Assembly::GetExecutingAssembly),
 // so this works for both the source-tree build AND the user-scope install.
-// Falls back to "0.3.0" if the manifest can't be read (preserves the
-// v0.3.0-v0.3.5 behavior).
+// v0.3.19: fallback is now ENGINE_VERSION_STRING (the single source of
+// truth for the engine version) instead of the pre-v0.3.6 hardcoded
+// "0.3.0" string.
 static int CmdVersion() {
-    String^ version = "0.3.0";
+    String^ version = ENGINE_VERSION_STRING;
     try {
         // 1. Try the loaded Vortex.dll's directory (best -- always
         //    matches the loaded module regardless of cwd or VORTEX_MODULE_PATH).
@@ -1067,7 +1068,7 @@ static int CmdPluginsList(Paths^ p, bool asJson) {
     auto plugins = Plugin::Discover(p->HomeDir, p->SkillDir);
     if (plugins->Count == 0) {
         if (asJson) {
-            Console::WriteLine("{\"plugins\":[],\"total\":0}");
+            ConsoleX::WrapEnvelope("{\"plugins\":[],\"total\":0}", "ok");
         } else {
             Console::WriteLine("  (no plugins found)");
             Console::WriteLine("  Looked in: <skill>/plugins/  and  $VORTEX_HOME/plugins/");
@@ -1092,7 +1093,7 @@ static int CmdPluginsList(Paths^ p, bool asJson) {
         }
         sb->Append("],\"total\":"); sb->Append(plugins->Count);
         sb->Append("}");
-        Console::WriteLine(sb->ToString());
+        ConsoleX::WrapEnvelope(sb->ToString(), "ok");
     } else {
         ConsoleX::WriteText("  {0,-22}  {1,-10}  {2,-14}  {3}", "name", "version", "capability", "source");
         ConsoleX::WriteText("  ----------------------  ----------  --------------  ------");
@@ -1178,7 +1179,7 @@ static int CmdPluginTest(Paths^ p, String^ name, String^ inJson, int timeoutS) {
 static int CmdPluginRemove(Paths^ p, String^ name, bool asJson) {
     if (String::IsNullOrEmpty(p->HomeDir)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"VORTEX_HOME is not set; cannot remove user-scope plugins.\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"VORTEX_HOME is not set; cannot remove user-scope plugins.\"}", "error");
         } else {
             ConsoleX::Err("VORTEX_HOME is not set; cannot remove user-scope plugins.");
         }
@@ -1187,7 +1188,7 @@ static int CmdPluginRemove(Paths^ p, String^ name, bool asJson) {
     String^ userDir = Plugin::PluginPath(Path::Combine(p->HomeDir, "plugins"), name);
     if (!Directory::Exists(userDir)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"No user-scope plugin named: " + JsonX::EscapeJson(name) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"No user-scope plugin named: " + JsonX::EscapeJson(name) + "\"}", "error");
         } else {
             ConsoleX::Err("No user-scope plugin named: " + name);
         }
@@ -1200,7 +1201,7 @@ static int CmdPluginRemove(Paths^ p, String^ name, bool asJson) {
             sb->Append("{\"plugin\":\""); sb->Append(JsonX::EscapeJson(name));
             sb->Append("\",\"path\":\""); sb->Append(JsonX::EscapeJson(userDir));
             sb->Append("\"}");
-            Console::WriteLine(sb->ToString());
+            ConsoleX::WrapEnvelope(sb->ToString(), "ok");
         } else {
             ConsoleX::Ok("Removed user-scope plugin: " + name);
         }
@@ -1210,7 +1211,7 @@ static int CmdPluginRemove(Paths^ p, String^ name, bool asJson) {
         return 0;
     } catch (Exception^ ex) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"Remove failed: " + JsonX::EscapeJson(ex->Message) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"Remove failed: " + JsonX::EscapeJson(ex->Message) + "\"}", "error");
         } else {
             ConsoleX::Err("Remove failed: " + ex->Message);
         }
@@ -1232,7 +1233,7 @@ static int CmdPluginRemove(Paths^ p, String^ name, bool asJson) {
 static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint, bool asJson) {
     if (String::IsNullOrEmpty(url)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"--plugin-install requires a GitHub URL\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"--plugin-install requires a GitHub URL\"}", "error");
         } else {
             ConsoleX::Err("Usage: skill.exe --plugin-install <github-url> [--name <plugin-name>]");
         }
@@ -1240,7 +1241,7 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint, bool asJson
     }
     if (String::IsNullOrEmpty(p->HomeDir)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"VORTEX_HOME is not set; cannot install plugins.\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"VORTEX_HOME is not set; cannot install plugins.\"}", "error");
         } else {
             ConsoleX::Err("VORTEX_HOME is not set; cannot install plugins.");
         }
@@ -1278,7 +1279,7 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint, bool asJson
     }
     if (String::IsNullOrEmpty(owner) || String::IsNullOrEmpty(repo)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"Could not parse GitHub URL: " + JsonX::EscapeJson(url) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"Could not parse GitHub URL: " + JsonX::EscapeJson(url) + "\"}", "error");
         } else {
             ConsoleX::Err("Could not parse GitHub URL: " + url);
         }
@@ -1311,7 +1312,7 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint, bool asJson
         proc->WaitForExit(120000);
         if (proc->ExitCode != 0) {
             if (asJson) {
-                Console::WriteLine("{\"error\":\"curl download failed: " + JsonX::EscapeJson(curlErr) + "\",\"tarball_url\":\"" + JsonX::EscapeJson(tarballUrl) + "\"}");
+                ConsoleX::WrapEnvelope("{\"error\":\"curl download failed: " + JsonX::EscapeJson(curlErr) + "\",\"tarball_url\":\"" + JsonX::EscapeJson(tarballUrl) + "\"}", "error");
             } else {
                 ConsoleX::Err("curl download failed: " + curlErr);
             }
@@ -1319,7 +1320,7 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint, bool asJson
         }
     } catch (Exception^ ex) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"curl.exe not available: " + JsonX::EscapeJson(ex->Message) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"curl.exe not available: " + JsonX::EscapeJson(ex->Message) + "\"}", "error");
         } else {
             ConsoleX::Err("curl.exe not available: " + ex->Message);
         }
@@ -1328,7 +1329,7 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint, bool asJson
 
     if (!File::Exists(tarballPath)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"Download returned no file\",\"tarball_url\":\"" + JsonX::EscapeJson(tarballUrl) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"Download returned no file\",\"tarball_url\":\"" + JsonX::EscapeJson(tarballUrl) + "\"}", "error");
         } else {
             ConsoleX::Err("Download returned no file");
         }
@@ -1367,7 +1368,7 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint, bool asJson
         if (proc->ExitCode != 0) {
             String^ err = proc->StandardError->ReadToEnd();
             if (asJson) {
-                Console::WriteLine("{\"error\":\"Extract failed: " + JsonX::EscapeJson(err) + "\"}");
+                ConsoleX::WrapEnvelope("{\"error\":\"Extract failed: " + JsonX::EscapeJson(err) + "\"}", "error");
             } else {
                 ConsoleX::Err("Extract failed: " + err);
             }
@@ -1377,7 +1378,7 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint, bool asJson
         }
     } catch (Exception^ ex) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"tar.exe not available: " + JsonX::EscapeJson(ex->Message) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"tar.exe not available: " + JsonX::EscapeJson(ex->Message) + "\"}", "error");
         } else {
             ConsoleX::Err("tar.exe not available: " + ex->Message);
         }
@@ -1389,7 +1390,7 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint, bool asJson
     String^ manifestPath = Path::Combine(targetDir, "plugin.json");
     if (!File::Exists(manifestPath)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"Plugin manifest not found at: " + JsonX::EscapeJson(manifestPath) + "\",\"plugin\":\"" + JsonX::EscapeJson(pluginName) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"Plugin manifest not found at: " + JsonX::EscapeJson(manifestPath) + "\",\"plugin\":\"" + JsonX::EscapeJson(pluginName) + "\"}", "error");
         } else {
             ConsoleX::Err("Plugin manifest not found at: " + manifestPath);
             ConsoleX::Err("The repo must contain a plugin.json at its root.");
@@ -1400,7 +1401,7 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint, bool asJson
     JsonDocument^ doc = JsonX::ReadFile(manifestPath);
     if (doc == nullptr) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"Invalid plugin.json: " + JsonX::EscapeJson(manifestPath) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"Invalid plugin.json: " + JsonX::EscapeJson(manifestPath) + "\"}", "error");
         } else {
             ConsoleX::Err("Invalid plugin.json: " + manifestPath);
         }
@@ -1410,7 +1411,7 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint, bool asJson
     String^ manifestName = JsonX::GetStrOr(doc->RootElement, "name", pluginName);
     if (manifestName != pluginName) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"Plugin name in manifest does not match folder\",\"manifest_name\":\"" + JsonX::EscapeJson(manifestName) + "\",\"folder_name\":\"" + JsonX::EscapeJson(pluginName) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"Plugin name in manifest does not match folder\",\"manifest_name\":\"" + JsonX::EscapeJson(manifestName) + "\",\"folder_name\":\"" + JsonX::EscapeJson(pluginName) + "\"}", "error");
         } else {
             ConsoleX::Err("Plugin name in manifest (" + manifestName + ") does not match folder (" + pluginName + ")");
         }
@@ -1421,7 +1422,7 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint, bool asJson
     String^ entryPath = Path::Combine(targetDir, entry);
     if (!File::Exists(entryPath)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"Plugin entry not found at: " + JsonX::EscapeJson(entryPath) + "\",\"expected_entry\":\"" + JsonX::EscapeJson(entry) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"Plugin entry not found at: " + JsonX::EscapeJson(entryPath) + "\",\"expected_entry\":\"" + JsonX::EscapeJson(entry) + "\"}", "error");
         } else {
             ConsoleX::Err("Plugin entry not found at: " + entryPath);
         }
@@ -1437,7 +1438,7 @@ static int CmdPluginInstall(Paths^ p, String^ url, String^ nameHint, bool asJson
         sb->Append("\",\"size_bytes\":"); sb->Append((Int64)size);
         sb->Append(",\"entry\":\""); sb->Append(JsonX::EscapeJson(entry));
         sb->Append("\"}");
-        Console::WriteLine(sb->ToString());
+        ConsoleX::WrapEnvelope(sb->ToString(), "ok");
     } else {
         ConsoleX::Ok("Installed plugin: " + pluginName);
     }
@@ -1466,7 +1467,7 @@ static int CmdTeamConfig(Paths^ p, bool asJson) {
 
     if (configExists && doc == nullptr) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"invalid config.json at " + JsonX::EscapeJson(cfgPath) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"invalid config.json at " + JsonX::EscapeJson(cfgPath) + "\"}", "error");
         } else {
             ConsoleX::Err("Invalid config.json at: " + cfgPath);
         }
@@ -1495,7 +1496,7 @@ static int CmdTeamConfig(Paths^ p, bool asJson) {
         sb->Append("\"tasks_dir\":\"");            sb->Append(JsonX::EscapeJson(p->TasksDir));            sb->Append("\",");
         sb->Append("\"in_progress_dir\":\"");      sb->Append(JsonX::EscapeJson(p->InProgressDir));      sb->Append("\"");
         sb->Append("}}");
-        Console::WriteLine(sb->ToString());
+        ConsoleX::WrapEnvelope(sb->ToString(), "ok");
         return 0;
     }
 
@@ -1536,8 +1537,8 @@ static int CmdStreamList(Paths^ p, bool asJson) {
     List<String^>^ tasks = StreamSink::ListInProgress(p);
     if (tasks->Count == 0) {
         if (asJson) {
-            Console::WriteLine("{\"streams\":[],\"total\":0,\"in_progress\":\"" +
-                JsonX::EscapeJson(p->InProgressDir) + "\"}");
+            ConsoleX::WrapEnvelope("{\"streams\":[],\"total\":0,\"in_progress\":\"" +
+                JsonX::EscapeJson(p->InProgressDir) + "\"}", "ok");
         } else {
             Console::WriteLine("  (no in-progress dispatches)");
         }
@@ -1575,7 +1576,7 @@ static int CmdStreamList(Paths^ p, bool asJson) {
         sb->Append("],\"total\":"); sb->Append(tasks->Count);
         sb->Append(",\"in_progress\":\""); sb->Append(JsonX::EscapeJson(p->InProgressDir));
         sb->Append("\"}");
-        Console::WriteLine(sb->ToString());
+        ConsoleX::WrapEnvelope(sb->ToString(), "ok");
         return 0;
     }
     // Text mode (unchanged)
@@ -1675,8 +1676,8 @@ static int CmdStream(Paths^ p, String^ taskId, bool autoOpen, bool asJson) {
     String^ dir = Path::Combine(p->InProgressDir, taskId);
     if (!Directory::Exists(dir)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"In-progress dir not found\",\"path\":\"" +
-                JsonX::EscapeJson(dir) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"In-progress dir not found\",\"path\":\"" +
+                JsonX::EscapeJson(dir) + "\"}", "error");
         } else {
             ConsoleX::Err("In-progress dir not found: " + dir);
             ConsoleX::Err("Is the dispatch running? Try --stream-list to see what's in progress.");
@@ -1981,8 +1982,8 @@ static int CmdStreamStop(Paths^ p, String^ taskId, bool asJson) {
     String^ dir = Path::Combine(p->InProgressDir, taskId);
     if (!Directory::Exists(dir)) {
         if (asJson) {
-            Console::WriteLine("{\"error\":\"No in-progress dispatch\",\"path\":\"" +
-                JsonX::EscapeJson(dir) + "\"}");
+            ConsoleX::WrapEnvelope("{\"error\":\"No in-progress dispatch\",\"path\":\"" +
+                JsonX::EscapeJson(dir) + "\"}", "error");
         } else {
             ConsoleX::Err("No in-progress dispatch: " + taskId);
         }
@@ -1990,8 +1991,8 @@ static int CmdStreamStop(Paths^ p, String^ taskId, bool asJson) {
     }
     long ts = (long)(DateTime::UtcNow - DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind::Utc)).TotalSeconds;
     if (asJson) {
-        Console::WriteLine("{\"stopped\":true,\"task_id\":\"" +
-            JsonX::EscapeJson(taskId) + "\",\"stopped_at\":" + ts + "}");
+        ConsoleX::WrapEnvelope("{\"stopped\":true,\"task_id\":\"" +
+            JsonX::EscapeJson(taskId) + "\",\"stopped_at\":" + ts + "}", "ok");
     } else {
         Console::WriteLine("  [stream] stopped watching " + taskId + " (dispatch continues in background)");
         Console::WriteLine("  Use --stream-finalize to manually move .partial files to deliverables/");
@@ -2012,8 +2013,8 @@ static int CmdHint(Paths^ p, String^ taskId, String^ text, bool asJson) {
     bool ok = StreamSink::AppendHint(p, taskId, text);
     if (ok) {
         if (asJson) {
-            Console::WriteLine("{\"hint_recorded\":true,\"task_id\":\"" +
-                JsonX::EscapeJson(taskId) + "\",\"index\":" + (preCount + 1) + ",\"ts\":" + ts + "}");
+            ConsoleX::WrapEnvelope("{\"hint_recorded\":true,\"task_id\":\"" +
+                JsonX::EscapeJson(taskId) + "\",\"index\":" + (preCount + 1) + ",\"ts\":" + ts + "}", "ok");
         } else {
             ConsoleX::Ok("Hint sent to " + taskId + ": " + text);
         }
@@ -2023,7 +2024,7 @@ static int CmdHint(Paths^ p, String^ taskId, String^ text, bool asJson) {
         return 0;
     }
     if (asJson) {
-        Console::WriteLine("{\"error\":\"Failed to write hint. Is the in-progress dir for " + taskId + " present?\"}");
+        ConsoleX::WrapEnvelope("{\"error\":\"Failed to write hint. Is the in-progress dir for " + taskId + " present?\"}", "error");
     } else {
         ConsoleX::Err("Failed to write hint. Is the in-progress dir for " + taskId + " present?");
     }
@@ -2080,7 +2081,7 @@ static int CmdStreamFinalize(Paths^ p, String^ taskId, bool asJson) {
             sb->Append(",\"deliverables\":[]");
         }
         sb->Append("}");
-        Console::WriteLine(sb->ToString());
+        ConsoleX::WrapEnvelope(sb->ToString(), "ok");
     } else {
         ConsoleX::Ok("Stream finalized: " + taskId);
     }
@@ -2539,7 +2540,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         bool asJson = false;
         if (args->Length < 2) {
             if (asJson) {
-                Console::WriteLine("{\"error\":\"--package requires a swarm_id\"}");
+                ConsoleX::WrapEnvelope("{\"error\":\"--package requires a swarm_id\"}", "error");
             } else {
                 ConsoleX::Err("Usage: skill.exe --package <swarm_id> [--dry-run] [--json]");
             }
@@ -2739,7 +2740,7 @@ static int Dispatch(Paths^ p, array<String^>^ args) {
         if (String::IsNullOrEmpty(project)) project = p->ProjectName;
         if (String::IsNullOrEmpty(project)) {
             if (asJson) {
-                Console::WriteLine("{\"error\":\"--memory-show requires a project slug or $VORTEX_PROJECT\"}");
+                ConsoleX::WrapEnvelope("{\"error\":\"--memory-show requires a project slug or $VORTEX_PROJECT\"}", "error");
             } else {
                 ConsoleX::Err("Usage: --memory-show <project_slug>");
             }

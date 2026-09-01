@@ -154,7 +154,7 @@ namespace Vortex {
             sb->AppendLine("  \"swarm_id\": \"" + JsonX::EscapeJson(swarmId) + "\",");
             sb->AppendLine("  \"project\": \"" + JsonX::EscapeJson(projectName) + "\",");
             sb->AppendLine("  \"packaged_at\": \"" + DateTime::Now.ToString("yyyy-MM-ddTHH:mm:ss", System::Globalization::CultureInfo::InvariantCulture) + "\",");
-            sb->AppendLine("  \"engine_version\": \"0.3.0\",");
+            sb->AppendLine("  \"engine_version\": \"" ENGINE_VERSION_STRING "\",");
             // v0.3.18: skip/failed fields are optional in the manifest.
             // v0.3.16's single-source design never skips/fails (every
             // file is ALREADY_PRESENT), so the fields are always 0 in

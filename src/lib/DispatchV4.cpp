@@ -126,7 +126,7 @@ namespace Vortex {
         // 7. PIPELINE FINALIZATION
         // The bash version calls record_behavioral_fingerprint + finalize_task_state,
         // both of which are stubs in the original codebase. We log a final line.
-        Console::WriteLine("V4_PIPELINE_OK task=" + taskId + " agent=" + agentName);
+        ConsoleX::WriteText("V4_PIPELINE_OK task=" + taskId + " agent=" + agentName);
         // Audit the dispatch end with the token + duration so the viewer
         // can correlate cost/timing with each task.
         Audit::Emit(

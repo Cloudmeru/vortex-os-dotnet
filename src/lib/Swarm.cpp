@@ -8,7 +8,7 @@ namespace Vortex {
     String^ Swarm::Spawn(Paths^ p, String^ swarmId, String^ masterObjective) {
         ConsoleColor prev = Console::ForegroundColor;
         Console::ForegroundColor = ConsoleColor::Green;
-        Console::WriteLine("[SWARM] Store Supervisor spawning Tier 2 Shift Supervisor workspace for swarm: " + swarmId);
+        ConsoleX::WriteText("[SWARM] Store Supervisor spawning Tier 2 Shift Supervisor workspace for swarm: " + swarmId);
         Console::ForegroundColor = prev;
 
         String^ swarmDir = Path::Combine(p->SwarmsDir, "active_" + swarmId);
@@ -58,7 +58,7 @@ namespace Vortex {
             File::WriteAllBytes(dbFile, gcnew array<unsigned char>{0});
         }
 
-        Console::WriteLine(swarmDir);
+        ConsoleX::WriteText(swarmDir);
         return swarmDir;
     }
 }

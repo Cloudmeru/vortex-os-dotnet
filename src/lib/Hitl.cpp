@@ -66,12 +66,12 @@ namespace Vortex {
             0                              // episode_number
         );
 
-        Console::WriteLine();
-        Console::WriteLine("**Approval Required (Task Context: " + taskId + ") [Severity: " + severity + "]**");
-        Console::WriteLine("Execution halted by the architecture safety gate. A critical action requires your verification:");
-        Console::WriteLine("> **Proposed Action:** " + proposedAction);
-        Console::WriteLine();
-        Console::WriteLine("Please reply directly with **'Approve " + taskId + "'** to authorize execution, or **'Deny'** to abort the sequence.");
+        ConsoleX::WriteText();
+        ConsoleX::WriteText("**Approval Required (Task Context: " + taskId + ") [Severity: " + severity + "]**");
+        ConsoleX::WriteText("Execution halted by the architecture safety gate. A critical action requires your verification:");
+        ConsoleX::WriteText("> **Proposed Action:** " + proposedAction);
+        ConsoleX::WriteText();
+        ConsoleX::WriteText("Please reply directly with **'Approve " + taskId + "'** to authorize execution, or **'Deny'** to abort the sequence.");
 
         // Exit with 203 to signal the conversation layer to surface the halt.
         // (The richer hitl_request Audit::Emit is above; the engine only
@@ -88,7 +88,7 @@ namespace Vortex {
         String^ status = doc->RootElement.GetProperty("status").GetString();
 
         if (status == "APPROVED") {
-            Console::WriteLine("**Authorization Verified.** Resuming pipeline execution for Task " + taskId + "...");
+            ConsoleX::WriteText("**Authorization Verified.** Resuming pipeline execution for Task " + taskId + "...");
             File::Delete(checkpointFile);
             // In the bash version this calls dispatch_v4_pipeline with the
             // task's owning agent. Without a plan_get_task_agent we default to
@@ -96,7 +96,7 @@ namespace Vortex {
             DispatchV4::Run(p, taskId, "supervisor.shift", nullptr);
             return 0;
         }
-        Console::WriteLine("Cannot resume. Task " + taskId + " is still flagged as: " + status);
+        ConsoleX::WriteText("Cannot resume. Task " + taskId + " is still flagged as: " + status);
         return 1;
     }
 }

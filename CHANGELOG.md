@@ -4,6 +4,96 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.19] — 2026-09-01
+
+### Added — Finish the v0.3.18 deferred items + 1 cleanup
+
+Three follow-up changes from the v0.3.18 review, all opt-in and
+backward-compatible.
+
+#### `--envelope` now wraps all 32 --json modes (not just 5)
+
+v0.3.18 added the envelope wrapper for the 5 dispatch verbs
+(`--package`, `--dispatch-v4`, `--dispatch-master`,
+`--dispatch-template`, `--recipe`). v0.3.19 extends the wrap to
+all 32 `--json` modes: the 23 read-side verbs (`--decision-record`,
+`--cost-report`, `--agents-trace`, etc.) and the streaming verbs
+(`--stream-list`, `--stream-stop`, etc.) all emit their JSON
+through `ConsoleX::WrapEnvelope` when `--envelope` is set.
+
+When `--envelope` is OFF (default), each verb keeps its v0.3.10-v0.3.18
+shape unchanged. When ON, the JSON line is wrapped in
+`{"vortex_version", "ts", "verb", "status", "result": {...inner...}}`.
+
+G74: 5/5.
+
+#### `--json-only` text suppression extended to lib/*.cpp
+
+v0.3.18's `--json-only` converted 141 `Console::WriteLine` calls in
+`src/skill.cpp` to `ConsoleX::WriteText` (which honors the global
+`JsonOnly` flag). v0.3.19 extends the same conversion to the
+remaining 62 `Console::WriteLine` calls in `src/lib/*.cpp`:
+`Commands.cpp` (47), `DispatchV4.cpp` (1), `Hitl.cpp` (8),
+`Inspector.cpp` (2), `PromptOptimizer.cpp` (2), `Swarm.cpp` (2).
+
+Result: `--json-only` mode is now silent for all 32 --json modes
+plus the per-mode text output (audit tables, plugin lists, cost
+breakdowns, etc.). The remaining 43 `Console::WriteLine` calls
+in skill.cpp are the JSON emit blocks + `Console::Error` (stderr).
+
+#### `ENGINE_VERSION_STRING` migrated to all 3 hardcoded sites
+
+v0.3.18 introduced the `#define ENGINE_VERSION_STRING` macro
+for the envelope wrapper's `vortex_version` field. The version
+banner (`--version`) and the manifest's `engine_version` field
+were still hardcoded as "0.3.0". v0.3.19 migrates all 3 sites:
+the macro is now the single source of truth, so bumping
+`ENGINE_VERSION_STRING` updates the banner, the manifest, and
+the envelope in one place.
+
+After this migration, `--version` reports the current macro
+value (e.g. "0.3.19") instead of the stale "0.3.0".
+
+### Files
+
+- `src/VortexCommon.h` (ENGINE_VERSION_STRING bumped to "0.3.19")
+- `src/skill.cpp` (5 additional `Console::WriteLine(sb->ToString())`
+  calls converted to `ConsoleX::WrapEnvelope` in CmdHitlStatus,
+  CmdAuditTrail, CmdTeamConfig, CmdStreamList, CmdStreamFinalize)
+- `src/lib/Commands.cpp` (16 JSON emits converted: 11 string-literal
+  + 5 StringBuilder; plus 1 `outputJson`-flag emit in AgentsDiscover)
+- `src/lib/Packager.cpp` (manifest `engine_version` field now uses
+  the macro)
+- `tests/test_engine.ps1` (+G74 5 sub-checks for the extended
+  envelope coverage)
+- `Vortex.psd1` (ModuleVersion 0.3.18 → 0.3.19)
+
+### Build artifact
+
+Vortex.dll 186 KB (was 180.5 KB at v0.3.18, +5.5 KB for the
+extended envelope wrapping across 5 lib files + 5 skill.cpp
+emit sites + the new error-handling branch in the recipe handler).
+
+### Test results
+
+- **401/401 PASS** (was 396/396 at v0.3.18, +5 new G74 sub-checks,
+  0 regressions on the 396 v0.3.18 tests).
+- G74 (5/5): --envelope wraps the 4 spot-checked verbs
+  (--decision-list, --agents-discover, --team-config,
+  --stream-list) + 1 budget envelope check.
+
+### Backward compat
+
+- Default mode (no `--json`) unchanged for all 35 verbs.
+- `--json` mode unchanged for all 35 verbs (inner shape preserved
+  inside the v0.3.18 envelope when `--envelope` is set).
+- `--version` now reports the actual version (0.3.19) instead of
+  the stale "0.3.0" string. The format (`VORTEX-OS Vortex.dll
+  X.Y.Z (C++/CLI on PowerShell 7+, .NET 10)`) is unchanged.
+- Manifest `engine_version` field now reports "0.3.19" instead
+  of "0.3.0". The field is informational; consumers should
+  not depend on a specific version string.
+
 ## [0.3.18] — 2026-08-31
 
 ### Added — Deferred items from the v0.3.17 Phase 2b review

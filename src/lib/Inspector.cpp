@@ -41,7 +41,7 @@ namespace Vortex {
         if (tokensUsedThisRun > threshold) {
             ConsoleColor prev = Console::ForegroundColor;
             Console::ForegroundColor = ConsoleColor::Red;
-            Console::WriteLine(String::Format(
+            ConsoleX::WriteText(String::Format(
                 "[INSPECTOR] Anomalous token burn velocity detected ({0} tokens). Evaluating loop telemetry...",
                 tokensUsedThisRun));
             Console::ForegroundColor = prev;
@@ -82,7 +82,7 @@ namespace Vortex {
 
             if (auditVerdict->StartsWith("HALT")) {
                 Console::ForegroundColor = ConsoleColor::Red;
-                Console::WriteLine("[INSPECTOR INTERVENTION] Flagging execution loop anomaly: " + auditVerdict);
+                ConsoleX::WriteText("[INSPECTOR INTERVENTION] Flagging execution loop anomaly: " + auditVerdict);
                 Console::ForegroundColor = prev;
                 // Audit the inspector intervention before the HITL halt so
                 // Get-VortexAuditTrail's "selfheal"-flavoured view shows the

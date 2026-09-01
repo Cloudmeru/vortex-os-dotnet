@@ -32,7 +32,7 @@ namespace Vortex {
 
         ConsoleColor prev = Console::ForegroundColor;
         Console::ForegroundColor = ConsoleColor::Yellow;
-        Console::WriteLine("[OPTIMIZER] Agent '" + agentName + "' breached constraint. Initiating self-healing...");
+        ConsoleX::WriteText("[OPTIMIZER] Agent '" + agentName + "' breached constraint. Initiating self-healing...");
         Console::ForegroundColor = prev;
 
         JsonDocument^ doc = JsonX::ReadFile(agentFile);
@@ -109,7 +109,7 @@ namespace Vortex {
             File::WriteAllText(agentFile, updated);
 
             Console::ForegroundColor = ConsoleColor::Green;
-            Console::WriteLine("[OPTIMIZER] Successfully updated prompt architecture for " + agentName + ".");
+            ConsoleX::WriteText("[OPTIMIZER] Successfully updated prompt architecture for " + agentName + ".");
             Console::ForegroundColor = prev;
 
             // Audit the self-heal cycle: which rule was violated, what
