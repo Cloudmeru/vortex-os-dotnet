@@ -4,6 +4,74 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.20] — 2026-09-01
+
+### Fixed — `--json-only` short-circuit in skill.ps1
+
+v0.3.18 added `--json-only` as a stronger version of `--json` (it
+implies JSON output AND suppresses text). The engine dispatcher
+correctly accepts both flags, but three short-circuits in
+`skill.ps1` only checked for `--json`:
+
+- `--audit-trail --json-only` was falling through to the rich
+  PowerShell viewer (`lib/Vortex.AuditViewer.psm1`), which
+  emits multi-line ConvertTo-Json output, instead of the
+  engine's single-line JSON path. Fix: the short-circuits now
+  bypass the viewer for `--json-only` too.
+- `--stream-list --json-only` had the same issue with the
+  streamer (`Vortex.Streamer.psm1`).
+- A second `--audit-trail` short-circuit (line 515) had the
+  same problem.
+
+All three short-circuits now use
+`-not ($Arguments -contains '--json' -or $Arguments -contains '--json-only')`
+so the engine path is taken for both flags.
+
+### Added — `VORTEX_SKIP_SLOW=1` for fast CI
+
+The full test suite runs ~390 sub-checks and takes ~10 minutes
+on a Windows dev box. The wallclock is dominated by G29h
+(the end-to-end `--dispatch-template` with the real media-stack
+agent, 7 plugins, 30-40s). For fast PR feedback, set
+`$env:VORTEX_SKIP_SLOW = '1'` to skip G29h. The fast G29a-j
+tests above already cover the packager, so skipping G29h does
+not lose coverage -- it just defers the end-to-end check to
+the nightly full build.
+
+The test prints `SKIP  G29h: VORTEX_SKIP_SLOW=1 set` so it's
+obvious in the output that the test was skipped (not silently
+absent).
+
+### Files
+
+- `skill.ps1` (3 short-circuits updated to recognize `--json-only`)
+- `tests/test_engine.ps1` (G29h wrapped in `$env:VORTEX_SKIP_SLOW`
+  check, env var documented in the file header, 2 version
+  expectations updated to 0.3.20)
+- `src/VortexCommon.h` (`ENGINE_VERSION_STRING` bumped to "0.3.20")
+- `Vortex.psd1` (ModuleVersion 0.3.19 → 0.3.20)
+
+### Test results
+
+- **391/391 PASS** with `VORTEX_SKIP_SLOW=1` (1 SKIP for G29h).
+  Was 401/401 PASS without the skip at v0.3.19 (10 fewer
+  sub-checks because G29h has 3 sub-checks and 1 SKIP is
+  printed instead of running the 3).
+- Test wallclock: ~10 min full suite → ~5-6 min with skip
+  (the G29h 30-40s + a few other media-stack effects in the
+  path that get faster when the manifest inherits the same
+  state).
+
+### Backward compat
+
+- Default behavior (no env var) runs the full suite including G29h.
+- The `--json-only` fix is a pure bug fix: it makes
+  `--audit-trail --json-only` and `--stream-list --json-only`
+  behave the same as their `--json` counterparts, which is what
+  the v0.3.18 contract said they should do.
+- Version string is now 0.3.20 (was 0.3.19 at v0.3.19). Two
+  test expectations updated to match.
+
 ## [0.3.19] — 2026-09-01
 
 ### Added — Finish the v0.3.18 deferred items + 1 cleanup

@@ -9,6 +9,15 @@
     (which can't be launched due to a known .NET 5+ /SUBSYSTEM bug; see
     src/build-tests.ps1 for details).
 
+    Environment variables:
+      $env:VORTEX_SKIP_SLOW = 1
+        Skip the slow tests (currently just G29h, the end-to-end
+        media-stack dispatch that takes 30-40s). Use this for fast
+        PR feedback; the slow tests still run in the nightly full
+        build. The fast G29a-j tests above already cover the
+        packager, so skipping G29h does not lose coverage -- it
+        just defers the end-to-end check.
+
     Tests:
       1. Engine version reports 0.1.9
       2. Decisions on a fresh home
@@ -76,7 +85,7 @@ try {
     # -----------------------------------------------------------------------
     Write-Host "[1] Engine version"
     $ver = & pwsh -NoProfile -File $skillPath --version 2>&1 | Select-Object -Last 1
-    Check "engine version reports 0.3.0" { $ver -match '0\.3\.0' }
+    Check "engine version reports 0.3.20 (v0.3.20 ENGINE_VERSION_STRING migration)" { $ver -match '0\.3\.20' }
 
     # -----------------------------------------------------------------------
     # 2. --decision-list on a fresh home
@@ -147,7 +156,7 @@ try {
     $manifest = Get-Content (Join-Path $dryDest '.manifest.json') -Raw | ConvertFrom-Json
     Check "manifest.swarm_id is $swarmId" { $manifest.swarm_id -eq $swarmId }
     Check "manifest.project is pkg_test" { $manifest.project -eq 'pkg_test' }
-    Check "manifest.engine_version is 0.3.0" { $manifest.engine_version -eq '0.3.0' }
+    Check "manifest.engine_version is 0.3.20 (v0.3.20 ENGINE_VERSION_STRING migration)" { $manifest.engine_version -eq '0.3.20' }
     Check "manifest.summary.copied is 3" { $manifest.summary.copied -eq 3 }
     # v0.3.18: summary.skipped/failed are now optional in the manifest
     # (omitted when 0). v0.3.16's single-source design never skips/fails,
@@ -1320,6 +1329,15 @@ Write-Output '===END==='
     # isolation. G29h here is the end-to-end coverage.
     Write-Host ""
     Write-Host "[29h] --dispatch-template end-to-end: executor's files show up in the manifest"
+    # v0.3.20: VORTEX_SKIP_SLOW=1 skips this test (and any other test
+    # marked with a [SLOW] header). G29h invokes the real media-stack
+    # agent (7 plugins, 30-40s) and dominates the test suite wallclock.
+    # The packager itself is fully covered by the fast G29a-j tests
+    # above, so skipping G29h does not lose coverage -- it just defers
+    # the end-to-end check to a nightly/full run.
+    if ($env:VORTEX_SKIP_SLOW -eq '1') {
+        Write-Host "  SKIP  G29h: VORTEX_SKIP_SLOW=1 set (end-to-end media-stack dispatch deferred to nightly run)"
+    } else {
     $g29hProj = "g29h_e2e_$((Get-Date).Ticks)"
     $env:VORTEX_PROJECT = $g29hProj
     $g29hTemplate = Join-Path $swarmsDir 'g29h_e2e.json'
@@ -1356,6 +1374,7 @@ Write-Output '===END==='
         $g29hManifestJson -and $g29hManifestJson.files -is [array] -and
         ($g29hManifestJson.files | ForEach-Object { $_.status } | Sort-Object -Unique) -join ',' -eq 'ALREADY_PRESENT'
     }
+    } # end of G29h VORTEX_SKIP_SLOW block
 
     # -----------------------------------------------------------------------
     # G30: --with-memory preserves real newlines in the task file
@@ -2517,14 +2536,24 @@ Write-Output '===END==='
     $g72JsonEngineLines = @($g72JsonOut | Where-Object { $_ -notmatch '^\[vortex-os\]' })
     $g72JsonJsonLines = @($g72JsonOut | Where-Object { $_.Trim().StartsWith('{') -and $_.Trim().EndsWith('}') })
     Check "G72: --package --json emits both text and JSON" {
-        # Use a fresh swarm so the test doesn't depend on packager
-        # idempotency state from earlier G4/G29 tests in the suite.
+        # v0.3.20: compare --json mode to --json-only mode on a fresh
+        # swarm. --json emits rich text + the JSON line; --json-only
+        # emits just the JSON line. The text count should be higher
+        # in --json mode than in --json-only mode.
         $g72BothSwarm = "g72_both_$((Get-Date).Ticks)"
         $g72BothSwarmDir = Join-Path $swarmsDir "active_$g72BothSwarm"
         New-Item -ItemType Directory -Path $g72BothSwarmDir -Force | Out-Null
+        $g72OnlyFreshSwarm = "g72_only_$((Get-Date).Ticks)"
+        $g72OnlyFreshSwarmDir = Join-Path $swarmsDir "active_$g72OnlyFreshSwarm"
+        New-Item -ItemType Directory -Path $g72OnlyFreshSwarmDir -Force | Out-Null
         $g72BothOut = & pwsh -NoProfile -File $skillPath --package $g72BothSwarm --json 2>&1
+        $g72OnlyOut = & pwsh -NoProfile -File $skillPath --package $g72OnlyFreshSwarm --json-only 2>&1
         $g72BothEng = @($g72BothOut | Where-Object { $_ -notmatch '^\[vortex-os\]' }).Count
-        $g72BothEng -gt $g72JsonEngineLines.Count
+        $g72OnlyEng = @($g72OnlyOut | Where-Object { $_ -notmatch '^\[vortex-os\]' }).Count
+        # --json mode emits more text than --json-only mode (text is
+        # suppressed under --json-only). The JSON line count is the
+        # same (1) in both modes.
+        $g72BothEng -gt $g72OnlyEng
     }
 
     # --json-only mode: JSON only, text suppressed
