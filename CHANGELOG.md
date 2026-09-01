@@ -4,6 +4,62 @@ All notable changes to the VORTEX-OS .NET 10 engine are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.3.21] — 2026-09-01
+
+### Added — Skill wrapper TTY auto-detect (opt-in)
+
+The `skill.ps1` wrapper now auto-picks the right output mode
+when `$env:VORTEX_AUTO_TTY = '1'` (or `--auto-ty` is passed):
+
+- **TTY session** (interactive terminal): auto-add `--text`
+  (currently a no-op since text is the engine default, but
+  future-proofs for v1.0.0 when JSON becomes the default).
+- **Pipe** (stdout redirected): auto-add `--json-only` so
+  `skill --cost-report | jq` and `skill --agents-discover |
+  python -m json.tool` work out of the box.
+
+User-supplied `--json` / `--json-only` / `--envelope` / `--text`
+always take precedence (the auto-detect is skipped). `--auto-ty`
+is stripped from `$Arguments` before dispatch (it's a
+wrapper-only flag).
+
+The flag is **opt-in** (default off) so existing workflows that
+pipe text to grep/awk aren't broken. The Unix convention is
+auto-detect ON by default, but we ship it OFF to preserve
+backward compat. v1.0.0 will flip the default to ON.
+
+### Implementation note
+
+`--text` and `--json-only` are appended to the END of
+`$Arguments`, not prepended. The engine's dispatcher reads
+`args[0]` as the command name (e.g. `--package`); prepending
+would make the dispatcher see `--text` / `--json-only` as the
+command and bail with a usage error. The append-at-end
+ordering keeps the existing dispatcher contract intact.
+
+G75: 2/2 (default mode emits text; pipe mode auto-adds --json-only).
+
+### Files
+
+- `skill.ps1` (new section 6b: TTY auto-detect with append-at-end
+  flag injection; opt-in via `$env:VORTEX_AUTO_TTY` or `--auto-ty`)
+- `tests/test_engine.ps1` (+G75 2 sub-checks for the auto-detect
+  behavior on default + pipe modes)
+
+### Backward compat
+
+- Default behavior unchanged (no env var → text mode, no auto-add).
+- The opt-in is exactly that: opt-in. Setting `VORTEX_AUTO_TTY=1`
+  is the only way to get the auto-detect.
+- User-supplied `--json` / `--json-only` / `--envelope` / `--text`
+  always win over the auto-detect. There is no scenario where
+  the wrapper silently overrides a user-supplied flag.
+- The auto-detect is `--json-only` (clean JSON, text suppressed)
+  not `--json` (text + JSON). So pipes always get pure JSON.
+  Scripts that pipe to text-processing tools (grep, awk) and
+  expect text will need to either unset `VORTEX_AUTO_TTY` or
+  pass `--text` explicitly.
+
 ## [0.3.20] — 2026-09-01
 
 ### Fixed — `--json-only` short-circuit in skill.ps1

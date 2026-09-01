@@ -2724,6 +2724,53 @@ Write-Output '===END==='
     }
 
     # -----------------------------------------------------------------------
+    # G75: skill.ps1 TTY auto-detect (v0.3.21).
+    # When $env:VORTEX_AUTO_TTY = '1' (or --auto-ty is passed), the skill
+    # wrapper auto-picks the right output mode:
+    #   - TTY session (interactive terminal): auto-add --text (currently a
+    #     no-op since text is the engine default, but future-proofs for
+    #     v1.0.0 when JSON becomes the default)
+    #   - Pipe (stdout redirected): auto-add --json-only (clean JSON for
+    #     `| jq`, `| python -m json.tool`, etc.)
+    # User-supplied --json / --json-only / --envelope / --text always take
+    # precedence. The flag is opt-in (default off) so existing workflows
+    # that pipe text to grep/awk aren't broken.
+    # -----------------------------------------------------------------------
+    $g75Swarm = "g75_swarm_$((Get-Date).Ticks)"
+    $g75SwarmDir = Join-Path $swarmsDir "active_$g75Swarm"
+    New-Item -ItemType Directory -Path $g75SwarmDir -Force | Out-Null
+    $g75Proj = "g75_proj_$((Get-Date).Ticks)"
+    $env:VORTEX_PROJECT = $g75Proj
+    $g75ProjDir = Join-Path $scratchHome "deliverables/$g75Proj"
+    if (-not (Test-Path $g75ProjDir)) { New-Item -ItemType Directory -Path $g75ProjDir -Force | Out-Null }
+    "g75 file" | Set-Content -LiteralPath (Join-Path $g75ProjDir 'g75.md') -Encoding UTF8
+
+    # Default (no VORTEX_AUTO_TTY): text mode. 29 engine output lines, 0 JSON.
+    $g75DefaultOut = & pwsh -NoProfile -File $skillPath --package $g75Swarm 2>&1
+    $g75DefaultEng = @($g75DefaultOut | Where-Object { $_ -notmatch '^\[vortex-os\]' })
+    $g75DefaultJson = @($g75DefaultEng | Where-Object { $_.Trim().StartsWith('{') -and $_.Trim().EndsWith('}') })
+    Check "G75: default mode (VORTEX_AUTO_TTY unset) emits text" {
+        $g75DefaultEng.Count -gt 5 -and $g75DefaultJson.Count -eq 0
+    }
+
+    # VORTEX_AUTO_TTY=1: pipe (test env captures output) -> auto-adds --json-only.
+    # Result: 1 line, exactly the JSON package_completed object.
+    $g75Swarm2 = "g75_swarm2_$((Get-Date).Ticks)"
+    $g75Swarm2Dir = Join-Path $swarmsDir "active_$g75Swarm2"
+    New-Item -ItemType Directory -Path $g75Swarm2Dir -Force | Out-Null
+    $env:VORTEX_AUTO_TTY = '1'
+    try {
+        $g75AutoOut = & pwsh -NoProfile -File $skillPath --package $g75Swarm2 2>&1
+        $g75AutoEng = @($g75AutoOut | Where-Object { $_ -notmatch '^\[vortex-os\]' })
+        $g75AutoJson = @($g75AutoEng | Where-Object { $_.Trim().StartsWith('{') -and $_.Trim().EndsWith('}') })
+        Check "G75: VORTEX_AUTO_TTY=1 + pipe auto-adds --json-only (1 JSON line)" {
+            $g75AutoEng.Count -eq 1 -and $g75AutoJson.Count -eq 1
+        }
+    } finally {
+        $env:VORTEX_AUTO_TTY = '0'
+    }
+
+    # -----------------------------------------------------------------------
     # Summary
     # -----------------------------------------------------------------------
     Write-Host ""

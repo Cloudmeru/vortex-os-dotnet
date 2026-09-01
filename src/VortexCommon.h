@@ -29,7 +29,7 @@ namespace Vortex {
     // Pre-v0.3.18 the string "0.3.0" was hardcoded in 5+ places. The
     // envelope wrapper needs the version; the dispatcher banner and
     // --version output also need it. Bump this on every release.
-    #define ENGINE_VERSION_STRING "0.3.20"
+    #define ENGINE_VERSION_STRING "0.3.21"
 
     // -------------------------------------------------------------------------
     // JSON helpers — thin wrappers around System.Text.Json
